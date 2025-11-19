@@ -1,0 +1,342 @@
+"""
+Password management routes
+Security: CRUD operations with authentication and authorization
+"""
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, and_
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from datetime import datetime
+from typing import List
+from app.database import get_db
+from app.models import User, Password
+from app.schemas import (
+    PasswordCreate, PasswordUpdate, PasswordResponse, PasswordListResponse
+)
+from app.dependencies import get_current_user
+from app.security import calculate_password_strength, sanitize_input
+from app.config import settings
+
+router = APIRouter(prefix="/api/passwords", tags=["Passwords"])
+limiter = Limiter(key_func=get_remote_address)
+
+
+@router.post("", response_model=PasswordResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def create_password(
+    request: Request,
+    password_data: PasswordCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Create a new password
+    Security: Authentication required, input sanitization, strength calculation
+    """
+    # Security: Sanitize inputs
+    application_name = sanitize_input(password_data.application_name, 255)
+    account_user_name = sanitize_input(password_data.account_user_name, 255)
+    application_password = sanitize_input(password_data.application_password, 100)
+    application_type = sanitize_input(password_data.application_type, 255) if password_data.application_type else None
+    
+    # Security: Calculate password strength
+    strength = calculate_password_strength(application_password)
+    
+    # Security: Create password entry
+    new_password = Password(
+        user_id=current_user.user_id,
+        application_name=application_name,
+        application_type=application_type,
+        account_user_name=account_user_name,
+        application_password=application_password,
+        pswd_strength=strength,
+        datetime_added=datetime.utcnow()
+    )
+    
+    db.add(new_password)
+    await db.commit()
+    await db.refresh(new_password)
+    
+    return PasswordResponse.model_validate(new_password)
+
+
+@router.get("", response_model=PasswordListResponse)
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def get_passwords(
+    request: Request,
+    skip: int = 0,
+    limit: int = 100,
+    application_name: str = None,
+    application_type: str = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get all passwords for current user
+    Security: Authentication required, user isolation
+    """
+    # Security: Query only user's passwords
+    query = select(Password).where(Password.user_id == current_user.user_id)
+    
+    if application_name:
+        # Security: Sanitize application name
+        app_name = sanitize_input(application_name, 255)
+        query = query.where(Password.application_name == app_name)
+    
+    if application_type:
+        # Security: Sanitize application type
+        app_type = sanitize_input(application_type, 255)
+        query = query.where(Password.application_type == app_type)
+    
+    query = query.order_by(Password.datetime_added.desc()).offset(skip).limit(limit)
+    
+    result = await db.execute(query)
+    passwords = result.scalars().all()
+    
+    # Security: Get total count
+    count_query = select(func.count(Password.password_id)).where(Password.user_id == current_user.user_id)
+    if application_name:
+        count_query = count_query.where(Password.application_name == application_name)
+    if application_type:
+        app_type = sanitize_input(application_type, 255)
+        count_query = count_query.where(Password.application_type == app_type)
+    count_result = await db.execute(count_query)
+    total = count_result.scalar()
+    
+    return PasswordListResponse(
+        passwords=[PasswordResponse.model_validate(p) for p in passwords],
+        total=total
+    )
+
+
+@router.get("/recent", response_model=List[PasswordResponse])
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def get_recent_passwords(
+    request: Request,
+    limit: int = 10,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get recently added passwords
+    Security: Authentication required, limit results
+    """
+    # Security: Limit maximum results
+    limit = min(limit, 100)
+    
+    result = await db.execute(
+        select(Password)
+        .where(Password.user_id == current_user.user_id)
+        .order_by(Password.datetime_added.desc())
+        .limit(limit)
+    )
+    passwords = result.scalars().all()
+    
+    return [PasswordResponse.model_validate(p) for p in passwords]
+
+
+@router.get("/{password_id}", response_model=PasswordResponse)
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def get_password(
+    request: Request,
+    password_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get a specific password
+    Security: Authentication required, authorization check
+    """
+    result = await db.execute(
+        select(Password).where(
+            and_(Password.password_id == password_id, Password.user_id == current_user.user_id)
+        )
+    )
+    password = result.scalar_one_or_none()
+    
+    if password is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Password not found"
+        )
+    
+    return PasswordResponse.model_validate(password)
+
+
+@router.put("/{password_id}", response_model=PasswordResponse)
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def update_password(
+    request: Request,
+    password_id: int,
+    password_data: PasswordUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Update a password
+    Security: Authentication required, authorization check, password rotation
+    """
+    # Security: Query password with authorization check
+    result = await db.execute(
+        select(Password).where(
+            and_(Password.password_id == password_id, Password.user_id == current_user.user_id)
+        )
+    )
+    password = result.scalar_one_or_none()
+    
+    if password is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Password not found"
+        )
+    
+    # Security: Password rotation (year1 -> year2, year2 -> year3, etc.)
+    password.year5 = password.year4
+    password.year4 = password.year3
+    password.year3 = password.year2
+    password.year2 = password.year1
+    password.year1 = password.application_password
+    
+    # Security: Update password
+    password.application_password = sanitize_input(password_data.application_password, 100)
+    
+    # Security: Update other fields if provided
+    if password_data.application_name:
+        password.application_name = sanitize_input(password_data.application_name, 255)
+    if password_data.account_user_name:
+        password.account_user_name = sanitize_input(password_data.account_user_name, 255)
+    
+    # Security: Recalculate strength
+    password.pswd_strength = calculate_password_strength(password.application_password)
+    password.datetime_added = datetime.utcnow()
+    
+    await db.commit()
+    await db.refresh(password)
+    
+    return PasswordResponse.model_validate(password)
+
+
+@router.delete("/{password_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def delete_password(
+    request: Request,
+    password_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Delete a password
+    Security: Authentication required, authorization check
+    """
+    # Security: Query password with authorization check
+    result = await db.execute(
+        select(Password).where(
+            and_(Password.password_id == password_id, Password.user_id == current_user.user_id)
+        )
+    )
+    password = result.scalar_one_or_none()
+    
+    if password is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Password not found"
+        )
+    
+    await db.delete(password)
+    await db.commit()
+    
+    return None
+
+
+@router.get("/applications/list", response_model=List[dict])
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def get_applications(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get list of applications with account counts
+    Security: Authentication required, aggregated data
+    """
+    result = await db.execute(
+        select(
+            Password.application_name,
+            func.count(Password.password_id).label("total_accounts")
+        )
+        .where(Password.user_id == current_user.user_id)
+        .group_by(Password.application_name)
+        .order_by(Password.application_name)
+    )
+    
+    applications = result.all()
+    
+    return [
+        {"application_name": app.application_name, "total_accounts": app.total_accounts}
+        for app in applications
+    ]
+
+
+@router.get("/application-types/list", response_model=List[dict])
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def get_application_types(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get list of application types with password counts
+    Security: Authentication required, aggregated data
+    """
+    result = await db.execute(
+        select(
+            Password.application_type,
+            func.count(Password.password_id).label("total_passwords")
+        )
+        .where(
+            and_(
+                Password.user_id == current_user.user_id,
+                Password.application_type.isnot(None),
+                Password.application_type != ""
+            )
+        )
+        .group_by(Password.application_type)
+        .order_by(Password.application_type)
+    )
+    
+    application_types = result.all()
+    
+    return [
+        {"application_type": app_type.application_type, "total_passwords": app_type.total_passwords}
+        for app_type in application_types
+    ]
+
+
+@router.get("/applications/{application_name}", response_model=List[PasswordResponse])
+@limiter.limit(settings.RATE_LIMIT_PASSWORD)
+async def get_passwords_by_application(
+    request: Request,
+    application_name: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get all passwords for a specific application
+    Security: Authentication required, authorization check
+    """
+    # Security: Sanitize application name
+    app_name = sanitize_input(application_name, 255)
+    
+    result = await db.execute(
+        select(Password).where(
+            and_(
+                Password.user_id == current_user.user_id,
+                Password.application_name == app_name
+            )
+        ).order_by(Password.account_user_name)
+    )
+    passwords = result.scalars().all()
+    
+    return [PasswordResponse.model_validate(p) for p in passwords]
+
