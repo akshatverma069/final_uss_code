@@ -37,7 +37,27 @@ export default function Logscreen({ navigation }: any) {
         ]);
       }
     } catch (error: any) {
-      Alert.alert("Login Failed", error.message || "Invalid credentials");
+      // Extract user-friendly error message, removing any technical details
+      let errorMessage = "Invalid username or password";
+      
+      // Safely extract message from error object (only string values)
+      if (error instanceof Error) {
+        errorMessage = String(error.message || "");
+      } else if (typeof error === "string") {
+        errorMessage = error;
+      } else if (error?.message && typeof error.message === "string") {
+        errorMessage = error.message;
+      } else if (error?.detail && typeof error.detail === "string") {
+        errorMessage = error.detail;
+      }
+      
+      // Clean up the error message - remove technical prefixes
+      errorMessage = String(errorMessage || "").replace(/^API Error \[.*?\]:\s*/i, "");
+      errorMessage = errorMessage.replace(/^Error:\s*/i, "");
+      errorMessage = errorMessage.trim() || "Invalid username or password";
+      
+      // Show clean, user-friendly error message (no error object details)
+      Alert.alert("Login Failed", errorMessage);
     } finally {
       setLoading(false);
     }

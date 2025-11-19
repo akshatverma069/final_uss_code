@@ -69,8 +69,37 @@ const apiRequest = async (
     
     return null;
   } catch (error: any) {
-    console.error(`API Error [${endpoint}]:`, error);
-    throw error;
+    // Extract user-friendly error message, removing any technical prefixes
+    let errorMessage = "An error occurred";
+    
+    // Extract message from error object
+    if (error instanceof Error) {
+      errorMessage = error.message;
+    } else if (typeof error === "string") {
+      errorMessage = error;
+    } else if (error?.message && typeof error.message === "string") {
+      errorMessage = error.message;
+    } else if (error?.detail && typeof error.detail === "string") {
+      errorMessage = error.detail;
+    } else if (error?.error && typeof error.error === "string") {
+      errorMessage = error.error;
+    }
+    
+    // Clean up the error message - remove technical prefixes and ensure it's just a string
+    errorMessage = String(errorMessage || "").replace(/^API Error \[.*?\]:\s*/i, "");
+    errorMessage = errorMessage.replace(/^Error:\s*/i, "");
+    errorMessage = errorMessage.trim() || "An error occurred";
+    
+    // Log for debugging (using console.log to avoid triggering error overlays)
+    if (__DEV__) {
+      console.log(`[API] ${endpoint} error: ${errorMessage}`);
+    }
+    
+    // Create a new error with just the clean message string (no object details)
+    const cleanError = new Error(errorMessage);
+    // Ensure error object doesn't contain any extra properties
+    Object.setPrototypeOf(cleanError, Error.prototype);
+    throw cleanError;
   }
 };
 
