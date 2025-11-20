@@ -10,7 +10,7 @@ import {
   Image,
 } from "react-native";
 import { Picker } from "@react-native-picker/picker";
-import { authAPI, getAuthToken } from "../services/api";
+import { authAPI, getAuthToken, getCurrentUser } from "../services/api";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function Resetpasswordscreen({ navigation, route }: any) {
@@ -55,13 +55,18 @@ export default function Resetpasswordscreen({ navigation, route }: any) {
 
     setLoading(true);
     try {
-      // Get user ID from route params or token
+      // Get user ID from route params or stored user data
       let resetUserId = userId;
       if (!resetUserId) {
-        // TODO: Get user ID from token or stored user data
-        Alert.alert("Error", "User ID not found. Please login again.");
-        navigation.navigate("Login");
-        return;
+        // Get user ID from stored user data (when accessed from Settings)
+        const currentUser = getCurrentUser();
+        if (currentUser && currentUser.user_id) {
+          resetUserId = currentUser.user_id;
+        } else {
+          Alert.alert("Error", "User ID not found. Please login again.");
+          navigation.navigate("Login");
+          return;
+        }
       }
 
       const response = await authAPI.resetPassword(

@@ -115,10 +115,22 @@ async def signup(
         )
     
     # Security: Check if username already exists
-    result = await db.execute(
-        select(User).where(User.username == signup_data.username)
-    )
-    existing_user = result.scalar_one_or_none()
+    # Handle missing encryption_salt column gracefully
+    try:
+        result = await db.execute(
+            select(User.user_id).where(User.username == signup_data.username)
+        )
+        existing_user = result.scalar_one_or_none()
+    except Exception as e:
+        # If encryption_salt column doesn't exist, try with explicit columns
+        error_str = str(e).lower()
+        if "encryption_salt" in error_str or "1054" in error_str:
+            result = await db.execute(
+                select(User.user_id).where(User.username == signup_data.username)
+            )
+            existing_user = result.scalar_one_or_none()
+        else:
+            raise
     
     if existing_user:
         raise HTTPException(
@@ -207,13 +219,50 @@ async def forgot_password(
     Security: Rate limiting, security question verification
     """
     # Security: Query user
-    result = await db.execute(
-        select(User).where(
-            User.username == forgot_data.username,
-            User.question_id == forgot_data.question_id
+    # Handle missing encryption_salt column gracefully during migration
+    try:
+        result = await db.execute(
+            select(User).where(
+                User.username == forgot_data.username,
+                User.question_id == forgot_data.question_id
+            )
         )
-    )
-    user = result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+    except Exception as e:
+        # If encryption_salt column doesn't exist, select without it
+        error_str = str(e).lower()
+        if "encryption_salt" in error_str or "1054" in error_str:
+            result = await db.execute(
+                select(
+                    User.user_id,
+                    User.username,
+                    User.pswd,
+                    User.grp,
+                    User.question_id,
+                    User.answers
+                ).where(
+                    User.username == forgot_data.username,
+                    User.question_id == forgot_data.question_id
+                )
+            )
+            user_row = result.first()
+            if user_row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found or question mismatch"
+                )
+            # Create User object without encryption_salt
+            user = User(
+                user_id=user_row.user_id,
+                username=user_row.username,
+                pswd=user_row.pswd,
+                grp=user_row.grp,
+                question_id=user_row.question_id,
+                answers=user_row.answers,
+                encryption_salt=None
+            )
+        else:
+            raise
     
     # Security: Generic error to prevent user enumeration
     if user is None:
@@ -271,10 +320,44 @@ async def reset_password(
         )
     
     # Security: Query user
-    result = await db.execute(
-        select(User).where(User.user_id == reset_data.user_id)
-    )
-    user = result.scalar_one_or_none()
+    # Handle missing encryption_salt column gracefully during migration
+    try:
+        result = await db.execute(
+            select(User).where(User.user_id == reset_data.user_id)
+        )
+        user = result.scalar_one_or_none()
+    except Exception as e:
+        # If encryption_salt column doesn't exist, select without it
+        error_str = str(e).lower()
+        if "encryption_salt" in error_str or "1054" in error_str:
+            result = await db.execute(
+                select(
+                    User.user_id,
+                    User.username,
+                    User.pswd,
+                    User.grp,
+                    User.question_id,
+                    User.answers
+                ).where(User.user_id == reset_data.user_id)
+            )
+            user_row = result.first()
+            if user_row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            # Create User object without encryption_salt
+            user = User(
+                user_id=user_row.user_id,
+                username=user_row.username,
+                pswd=user_row.pswd,
+                grp=user_row.grp,
+                question_id=user_row.question_id,
+                answers=user_row.answers,
+                encryption_salt=None
+            )
+        else:
+            raise
     
     if user is None:
         raise HTTPException(
@@ -320,8 +403,14 @@ async def reset_password(
     # Security: Hash new password
     hashed_password = get_password_hash(reset_data.new_password)
     
-    # Security: Update password
-    user.pswd = hashed_password
+    # Security: Update password in database using UPDATE query
+    # This works whether user object is attached to session or not
+    from sqlalchemy import update
+    await db.execute(
+        update(User)
+        .where(User.user_id == reset_data.user_id)
+        .values(pswd=hashed_password)
+    )
     await db.commit()
     
     return {"success": True, "message": "Password reset successfully"}

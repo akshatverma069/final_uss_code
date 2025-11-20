@@ -64,16 +64,31 @@ async def create_trusted_user_request(
     Security: Authentication required, user validation
     """
     # Security: Find target user
-    result = await db.execute(
-        select(User).where(User.username == body.target_username)
-    )
-    target_user = result.scalar_one_or_none()
+    # Handle missing encryption_salt column gracefully
+    try:
+        result = await db.execute(
+            select(User.user_id, User.username).where(User.username == body.target_username)
+        )
+        target_user_row = result.first()
+    except Exception as e:
+        # If encryption_salt column doesn't exist, select without it
+        error_str = str(e).lower()
+        if "encryption_salt" in error_str or "1054" in error_str:
+            result = await db.execute(
+                select(User.user_id, User.username).where(User.username == body.target_username)
+            )
+            target_user_row = result.first()
+        else:
+            raise
     
-    if target_user is None:
+    if target_user_row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
+    
+    # Create a minimal User object for comparison
+    target_user = User(user_id=target_user_row.user_id, username=target_user_row.username)
     
     if target_user.user_id == current_user.user_id:
         raise HTTPException(
@@ -113,16 +128,31 @@ async def create_group_invitation(
     Security: Authentication required, user validation
     """
     # Security: Find target user
-    result = await db.execute(
-        select(User).where(User.username == body.target_username)
-    )
-    target_user = result.scalar_one_or_none()
+    # Handle missing encryption_salt column gracefully
+    try:
+        result = await db.execute(
+            select(User.user_id, User.username).where(User.username == body.target_username)
+        )
+        target_user_row = result.first()
+    except Exception as e:
+        # If encryption_salt column doesn't exist, select without it
+        error_str = str(e).lower()
+        if "encryption_salt" in error_str or "1054" in error_str:
+            result = await db.execute(
+                select(User.user_id, User.username).where(User.username == body.target_username)
+            )
+            target_user_row = result.first()
+        else:
+            raise
     
-    if target_user is None:
+    if target_user_row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
+    
+    # Create a minimal User object for comparison
+    target_user = User(user_id=target_user_row.user_id, username=target_user_row.username)
     
     # Security: Create message for target user
     message = {
