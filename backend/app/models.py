@@ -38,7 +38,7 @@ class Password(Base):
     """Password model with security features"""
     __tablename__ = "passwords"
     
-    password_id = Column(Integer, primary_key=True, index=True)
+    password_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
     application_name = Column(String(255), nullable=False, index=True)
     application_type = Column(Text, nullable=True, index=True)

@@ -22,6 +22,7 @@ export default function AddPasswordscreen({ navigation }: any) {
   const [includeNumbers, setIncludeNumbers] = useState(true);
   const [passwordLength, setPasswordLength] = useState(16);
   const [securityLevel, setSecurityLevel] = useState("2");
+  const [showPassword, setShowPassword] = useState(false);
 
   // generate a password
   const generatePassword = () => {
@@ -74,7 +75,35 @@ export default function AddPasswordscreen({ navigation }: any) {
         { cancelable: false }
       );
     } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to add password");
+      // Extract user-friendly error message, removing any technical details
+      let errorMessage = "Failed to add password. Please try again.";
+      
+      // Safely extract message from error object (only string values)
+      if (error instanceof Error) {
+        errorMessage = String(error.message || "");
+      } else if (typeof error === "string") {
+        errorMessage = error;
+      } else if (error?.message && typeof error.message === "string") {
+        errorMessage = error.message;
+      } else if (error?.detail && typeof error.detail === "string") {
+        errorMessage = error.detail;
+      } else if (error?.error && typeof error.error === "string") {
+        errorMessage = error.error;
+      }
+      
+      // Clean up the error message - remove technical prefixes and database details
+      errorMessage = String(errorMessage || "").replace(/^API Error \[.*?\]:\s*/i, "");
+      errorMessage = errorMessage.replace(/^Error:\s*/i, "");
+      // Remove SQL/database error details
+      errorMessage = errorMessage.replace(/\(pymysql\.err\..*?\)/gi, "");
+      errorMessage = errorMessage.replace(/\[SQL:.*?\]/gi, "");
+      errorMessage = errorMessage.replace(/\[parameters:.*?\]/gi, "");
+      errorMessage = errorMessage.replace(/\(Background on this error.*?\)/gi, "");
+      errorMessage = errorMessage.replace(/Field '.*?' doesn't have a default value/gi, "Database error");
+      errorMessage = errorMessage.trim() || "Failed to add password. Please try again.";
+      
+      // Show clean, user-friendly error message
+      Alert.alert("Error", errorMessage);
     } finally {
       setLoading(false);
     }
@@ -135,8 +164,16 @@ export default function AddPasswordscreen({ navigation }: any) {
             placeholderTextColor="#9FA5B4"
             value={password}
             onChangeText={setPassword}
-            secureTextEntry
+            secureTextEntry={!showPassword}
+            autoCapitalize="none"
+            autoCorrect={false}
           />
+          <Pressable
+            style={styles.eyeButton}
+            onPress={() => setShowPassword((prev) => !prev)}
+          >
+            <Text style={styles.eyeIcon}>{showPassword ? "🙈" : "👁️"}</Text>
+          </Pressable>
         </View>
 
         {/* Application Type */}
@@ -317,6 +354,8 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   inputContainer: {
+    flexDirection: "row",
+    alignItems: "center",
     backgroundColor: "#F4F6FA",
     borderRadius: 10,
     paddingHorizontal: 12,
@@ -330,6 +369,14 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: "#1B1F3B",
     height: "100%",
+  },
+  eyeButton: {
+    paddingHorizontal: 6,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  eyeIcon: {
+    fontSize: 18,
   },
   generateButton: {
     backgroundColor: "#F4F6FA",

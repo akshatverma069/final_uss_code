@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -54,6 +54,7 @@ export default function GroupDetailsscreen({ navigation, route }: any) {
   const [sharedPasswords, setSharedPasswords] = useState<SharedPasswordSummary[]>([]);
   const [sharedLoading, setSharedLoading] = useState(false);
   const [sharedVisibility, setSharedVisibility] = useState<Record<string, boolean>>({});
+  const inviteSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadMembers = useCallback(async () => {
     if (!group?.name) {
@@ -137,6 +138,40 @@ export default function GroupDetailsscreen({ navigation, route }: any) {
     }
   };
 
+  useEffect(() => {
+    return () => {
+      if (inviteSearchTimer.current) {
+        clearTimeout(inviteSearchTimer.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!inviteModalVisible) {
+      if (inviteSearchTimer.current) {
+        clearTimeout(inviteSearchTimer.current);
+      }
+      return;
+    }
+
+    const query = inviteQuery.trim();
+    if (query.length < 2) {
+      if (inviteSearchTimer.current) {
+        clearTimeout(inviteSearchTimer.current);
+      }
+      setInviteResults([]);
+      return;
+    }
+
+    if (inviteSearchTimer.current) {
+      clearTimeout(inviteSearchTimer.current);
+    }
+
+    inviteSearchTimer.current = setTimeout(() => {
+      searchUsers(query);
+    }, 400);
+  }, [inviteQuery, inviteModalVisible]);
+
   const openInviteModal = () => {
     setInviteModalVisible(true);
     setInviteQuery("");
@@ -152,8 +187,8 @@ export default function GroupDetailsscreen({ navigation, route }: any) {
     setInviteError(null);
   };
 
-  const searchUsers = async () => {
-    const query = inviteQuery.trim();
+  const searchUsers = async (overrideQuery?: string) => {
+    const query = (overrideQuery ?? inviteQuery).trim();
     if (query.length < 2) {
       setInviteError("Enter at least 2 characters to search.");
       setInviteResults([]);
@@ -357,7 +392,7 @@ export default function GroupDetailsscreen({ navigation, route }: any) {
             />
             <Pressable
               style={[styles.modalSearchButton, (inviteLoading || sendingInvite) && styles.disabledButton]}
-              onPress={searchUsers}
+              onPress={() => searchUsers()}
               disabled={inviteLoading || sendingInvite}
             >
               <Text style={styles.modalSearchText}>

@@ -43,21 +43,82 @@ export default function Signupscreen({ navigation }: any) {
     }
   };
 
+const passwordRules = [
+  {
+    key: "length",
+    label: "Minimum 8 characters",
+    check: (pwd: string) => pwd.length >= 8,
+  },
+  {
+    key: "uppercase",
+    label: "At least one uppercase letter",
+    check: (pwd: string) => /[A-Z]/.test(pwd),
+  },
+  {
+    key: "number",
+    label: "Contains a number",
+    check: (pwd: string) => /[0-9]/.test(pwd),
+  },
+  {
+    key: "special",
+    label: "Contains special character (@, #, !, ...)",
+    check: (pwd: string) => /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(pwd),
+  },
+];
+
+const validateSignupInputs = () => {
+  const issues: string[] = [];
+  const usernamePattern = /^[a-zA-Z0-9_-]{3,50}$/;
+  if (!usernamePattern.test(username.trim())) {
+    issues.push("Username must be 3-50 characters and only use letters, numbers, _ or -");
+  }
+
+  passwordRules.forEach((rule) => {
+    if (!rule.check(password)) {
+      issues.push(rule.label);
+    }
+  });
+  if (!/[a-z]/.test(password)) {
+    issues.push("Password must contain at least one lowercase letter");
+  }
+  if (["password", "12345678", "qwerty", "abc123", "password123"].includes(password.toLowerCase())) {
+    issues.push("Password is too common and easily guessable");
+  }
+
+  if (password !== confirmPassword) {
+    issues.push("Passwords do not match");
+  }
+
+  if (!securityQuestion) {
+    issues.push("Please choose a security question");
+  }
+
+  if (!answer.trim()) {
+    issues.push("Security answer cannot be empty");
+  }
+
+  if (issues.length > 0) {
+    Alert.alert("Fix these issues", issues.join("\n"));
+    return false;
+  }
+
+  return true;
+};
+
 const handleSignup = async () => {
   if (!username || !password || !confirmPassword || !answer || !securityQuestion) {
     Alert.alert("Error", "Please fill in all fields.");
     return;
   }
 
-  if (password !== confirmPassword) {
-    Alert.alert("Error", "Passwords do not match!");
+  if (!validateSignupInputs()) {
     return;
   }
 
   setLoading(true);
   try {
-    const questionId = parseInt(securityQuestion);
-    const response = await authAPI.signup(username, password, confirmPassword, questionId, answer);
+    const questionId = parseInt(securityQuestion, 10);
+    const response = await authAPI.signup(username.trim(), password, confirmPassword, questionId, answer.trim());
     
     if (response.access_token) {
       setAuthToken(response.access_token);
@@ -104,6 +165,29 @@ const handleSignup = async () => {
           value={password}
           onChangeText={setPassword}
         />
+      </View>
+      <View style={styles.passwordChecklist}>
+        {passwordRules.map((rule) => {
+          const met = rule.check(password);
+          return (
+            <View key={rule.key} style={styles.passwordRule}>
+              <View
+                style={[
+                  styles.ruleIndicator,
+                  met ? styles.ruleIndicatorMet : styles.ruleIndicatorPending,
+                ]}
+              />
+              <Text
+                style={[
+                  styles.ruleText,
+                  met ? styles.ruleTextMet : styles.ruleTextPending,
+                ]}
+              >
+                {rule.label}
+              </Text>
+            </View>
+          );
+        })}
       </View>
 
       {/* Confirm Master Password */}
@@ -257,6 +341,37 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-evenly",
     marginVertical: 20,
+  },
+  passwordChecklist: {
+    marginTop: -5,
+    marginBottom: 10,
+  },
+  passwordRule: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  ruleIndicator: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 8,
+  },
+  ruleIndicatorMet: {
+    backgroundColor: "#10B981",
+  },
+  ruleIndicatorPending: {
+    backgroundColor: "#EF4444",
+  },
+  ruleText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  ruleTextMet: {
+    color: "#10B981",
+  },
+  ruleTextPending: {
+    color: "#EF4444",
   },
 
   authBox: {

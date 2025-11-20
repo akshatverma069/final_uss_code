@@ -2,6 +2,7 @@
 Password management routes
 Security: CRUD operations with authentication and authorization
 """
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
@@ -43,22 +44,32 @@ async def create_password(
     # Security: Calculate password strength
     strength = calculate_password_strength(application_password)
     
-    # Security: Create password entry
-    new_password = Password(
-        user_id=current_user.user_id,
-        application_name=application_name,
-        application_type=application_type,
-        account_user_name=account_user_name,
-        application_password=application_password,
-        pswd_strength=strength,
-        datetime_added=datetime.utcnow()
-    )
-    
-    db.add(new_password)
-    await db.commit()
-    await db.refresh(new_password)
-    
-    return PasswordResponse.model_validate(new_password)
+    try:
+        # Security: Create password entry
+        new_password = Password(
+            user_id=current_user.user_id,
+            application_name=application_name,
+            application_type=application_type,
+            account_user_name=account_user_name,
+            application_password=application_password,
+            pswd_strength=strength,
+            datetime_added=datetime.utcnow()
+        )
+        
+        db.add(new_password)
+        await db.commit()
+        await db.refresh(new_password)
+        
+        return PasswordResponse.model_validate(new_password)
+    except Exception as e:
+        await db.rollback()
+        # Log full error for debugging
+        logging.error(f"Error creating password: {e}", exc_info=True)
+        # Return user-friendly error message
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create password. Please try again."
+        )
 
 
 @router.get("", response_model=PasswordListResponse)

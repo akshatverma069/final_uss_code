@@ -36,17 +36,6 @@ export default function Vaultscreen({ navigation, route }: any) {
   const [sharedPasswords, setSharedPasswords] = useState<SharedPasswordEntry[]>([]);
   const [sharedVisibility, setSharedVisibility] = useState<Record<string, boolean>>({});
 
-  useEffect(() => {
-    loadApplications();
-    loadSharedPasswords();
-  }, [loadApplications, loadSharedPasswords]);
-
-  useFocusEffect(
-    React.useCallback(() => {
-      loadSharedPasswords();
-    }, [loadSharedPasswords])
-  );
-
   const loadApplications = useCallback(async () => {
     setLoading(true);
     try {
@@ -116,6 +105,17 @@ export default function Vaultscreen({ navigation, route }: any) {
     }
   }, []);
 
+  useEffect(() => {
+    loadApplications();
+    loadSharedPasswords();
+  }, [loadApplications, loadSharedPasswords]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      loadSharedPasswords();
+    }, [loadSharedPasswords])
+  );
+
   const toggleSharedVisibility = (id: string) => {
     setSharedVisibility((prev) => ({
       ...prev,
@@ -132,6 +132,15 @@ export default function Vaultscreen({ navigation, route }: any) {
     }
     return true;
   });
+
+  const searchSuggestions =
+    searchQuery.trim().length > 0
+      ? platforms
+          .filter((platform) =>
+            platform.name.toLowerCase().startsWith(searchQuery.trim().toLowerCase())
+          )
+          .slice(0, 5)
+      : [];
 
   const handlePlatformPress = (platform: string) => {
     navigation.navigate("PasswordDetails", { platform });
@@ -163,6 +172,28 @@ export default function Vaultscreen({ navigation, route }: any) {
           onChangeText={setSearchQuery}
         />
       </View>
+
+      {searchQuery.trim().length > 0 && (
+        <View style={styles.suggestionsContainer}>
+          <Text style={styles.suggestionsTitle}>Recommendations</Text>
+          {searchSuggestions.length > 0 ? (
+            searchSuggestions.map((item) => (
+              <Pressable
+                key={item.id}
+                style={styles.suggestionItem}
+                onPress={() => handlePlatformPress(item.name)}
+              >
+                <Text style={styles.suggestionText}>{item.name}</Text>
+                <Text style={styles.suggestionCount}>
+                  {item.accountCount} {item.accountCount === 1 ? "account" : "accounts"}
+                </Text>
+              </Pressable>
+            ))
+          ) : (
+            <Text style={styles.suggestionsEmpty}>No matches for "{searchQuery.trim()}"</Text>
+          )}
+        </View>
+      )}
 
       {/* Add Password Button */}
       <Pressable
@@ -409,6 +440,38 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: "#4267FF",
     fontWeight: "600",
+  },
+  suggestionsContainer: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    padding: 15,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E0E4EC",
+    backgroundColor: "#F7F8FC",
+  },
+  suggestionsTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#1B1F3B",
+    marginBottom: 8,
+  },
+  suggestionItem: {
+    paddingVertical: 6,
+  },
+  suggestionText: {
+    fontSize: 14,
+    color: "#1B1F3B",
+    fontWeight: "600",
+  },
+  suggestionCount: {
+    fontSize: 12,
+    color: "#6A7181",
+  },
+  suggestionsEmpty: {
+    fontSize: 13,
+    color: "#6A7181",
+    fontStyle: "italic",
   },
 });
 

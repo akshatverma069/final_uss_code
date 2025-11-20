@@ -75,10 +75,28 @@ async def general_exception_handler(request: Request, exc: Exception):
     Security: No sensitive information in error messages
     """
     logging.error(f"Unhandled exception: {exc}", exc_info=True)
+    
+    # Extract user-friendly error message
+    error_message = "Internal server error"
+    
+    # Check if it's a database error
+    error_str = str(exc)
+    if "OperationalError" in error_str or "IntegrityError" in error_str or "DatabaseError" in error_str:
+        error_message = "A database error occurred. Please try again."
+    elif "ValidationError" in error_str:
+        error_message = "Invalid data provided. Please check your input."
+    elif settings.DEBUG:
+        # In debug mode, show simplified error (not full traceback)
+        if "doesn't have a default value" in error_str:
+            error_message = "Database configuration error. Please contact support."
+        else:
+            error_message = "An error occurred. Please try again."
+    
     return JSONResponse(
         status_code=500,
         content={
-            "error": "Internal server error" if not settings.DEBUG else str(exc)
+            "error": error_message,
+            "detail": str(exc) if settings.DEBUG else None
         }
     )
 

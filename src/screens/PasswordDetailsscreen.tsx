@@ -1,11 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
   TextInput,
   Pressable,
   StyleSheet,
-  FlatList,
   Modal,
   Alert,
   ScrollView,
@@ -25,6 +24,13 @@ interface PasswordAccount {
   isReused?: boolean;
 }
 
+type PasswordRecord = {
+  id: string;
+  platform: string;
+  username: string;
+  password: string;
+};
+
 export default function PasswordDetailsscreen({ navigation, route }: any) {
   const platform = route?.params?.platform || "Platform";
   
@@ -36,11 +42,44 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [checkingSecurity, setCheckingSecurity] = useState<{ [key: string]: boolean }>({});
   const [loading, setLoading] = useState(true);
+  const [allPasswordsCache, setAllPasswordsCache] = useState<PasswordRecord[] | null>(null);
+  const securityCheckTimers = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
 
   // Load passwords for the platform
   useEffect(() => {
     loadPlatformPasswords();
   }, [platform]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(securityCheckTimers.current).forEach((timer) => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+      });
+    };
+  }, []);
+
+  const normalizePasswordRecords = (records: any[]): PasswordRecord[] =>
+    records.map((p) => ({
+      id: (p.password_id ?? p.id ?? `${p.application_name}-${p.account_user_name}`).toString(),
+      platform: p.application_name || p.platform || "Unknown",
+      username: p.account_user_name || p.username || "",
+      password: p.application_password || p.password || "",
+    }));
+
+  const getAllPasswords = async (): Promise<PasswordRecord[]> => {
+    if (allPasswordsCache) {
+      return allPasswordsCache;
+    }
+    const data = await passwordsAPI.getAll(0, 1000);
+    const rawList = data.passwords || data || [];
+    const normalized = normalizePasswordRecords(rawList);
+    setAllPasswordsCache(normalized);
+    return normalized;
+  };
+
+  const invalidateAllPasswords = () => setAllPasswordsCache(null);
 
   const loadPlatformPasswords = async () => {
     setLoading(true);
@@ -72,6 +111,12 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
   };
 
   const checkAllPasswordsSecurity = async (accountsToCheck: PasswordAccount[]) => {
+    let allPasswords: PasswordRecord[] = [];
+    try {
+      allPasswords = await getAllPasswords();
+    } catch (error) {
+      console.error("Failed to load complete password list:", error);
+    }
     for (const account of accountsToCheck) {
       setCheckingSecurity((prev) => ({ ...prev, [account.id]: true }));
       
@@ -84,17 +129,7 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
         
         // Check if reused (we'll need all passwords for this)
         try {
-          const allPasswordsData = await passwordsAPI.getAll(0, 1000);
-          const allPasswords = allPasswordsData.passwords || allPasswordsData;
-          const reuseCheck = PasswordSecurityService.checkReused(
-            account.password,
-            allPasswords.map((p: any) => ({
-              id: p.password_id.toString(),
-              platform: p.application_name,
-              username: p.account_user_name,
-              password: p.application_password,
-            }))
-          );
+          const reuseCheck = PasswordSecurityService.checkReused(account.password, allPasswords);
           
           // Update account with security info
           setAccounts((prev) =>
@@ -144,17 +179,20 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
       
       // Try to check reuse (may fail if we can't get all passwords)
       try {
-        const allPasswordsData = await passwordsAPI.getAll(0, 1000);
-        const allPasswords = allPasswordsData.passwords || allPasswordsData;
-        const reuseCheck = PasswordSecurityService.checkReused(
-          password,
-          allPasswords.map((p: any) => ({
-            id: p.password_id.toString(),
-            platform: p.application_name,
-            username: p.account_user_name,
-            password: p.application_password,
-          }))
+        let allPasswords: PasswordRecord[] = allPasswordsCache ?? [];
+        if (allPasswords.length === 0) {
+          try {
+            allPasswords = await getAllPasswords();
+          } catch (error) {
+            console.error("Failed to load password list for reuse check:", error);
+            allPasswords = [];
+          }
+        }
+        const updatedList = allPasswords.map((pwd) =>
+          pwd.id === accountId ? { ...pwd, password } : pwd
         );
+        const reuseCheck = PasswordSecurityService.checkReused(password, updatedList);
+        setAllPasswordsCache(updatedList);
         
         setAccounts((prev) =>
           prev.map((acc) =>
@@ -169,6 +207,18 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
                 }
               : acc
           )
+        );
+        setEditingAccount((prev) =>
+          prev && prev.id === accountId
+            ? {
+                ...prev,
+                password,
+                strength: securityCheck.strength,
+                securityCheck,
+                isCompromised,
+                isReused: reuseCheck.isReused,
+              }
+            : prev
         );
       } catch {
         // If reuse check fails, just update with compromised and strength
@@ -185,6 +235,18 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
                 }
               : acc
           )
+        );
+        setEditingAccount((prev) =>
+          prev && prev.id === accountId
+            ? {
+                ...prev,
+                password,
+                strength: securityCheck.strength,
+                securityCheck,
+                isCompromised,
+                isReused: false,
+              }
+            : prev
         );
       }
     } catch (error) {
@@ -235,6 +297,15 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
     setEditingAccount({ ...account });
   };
 
+  const schedulePasswordSecurityCheck = (password: string, accountId: string) => {
+    if (securityCheckTimers.current[accountId]) {
+      clearTimeout(securityCheckTimers.current[accountId]!);
+    }
+    securityCheckTimers.current[accountId] = setTimeout(() => {
+      checkPasswordSecurity(password, accountId);
+    }, 400);
+  };
+
   const handleSaveEdit = async () => {
     if (editingAccount) {
       try {
@@ -242,16 +313,15 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
         await passwordsAPI.update(
           parseInt(editingAccount.id),
           editingAccount.password,
-          editingAccount.username !== accounts.find((a) => a.id === editingAccount.id)?.username
-            ? editingAccount.username
-            : undefined,
-          platform
+          platform,
+          editingAccount.username
         );
         
         // Check security of new password
         await checkPasswordSecurity(editingAccount.password, editingAccount.id);
         
         // Reload passwords
+        invalidateAllPasswords();
         await loadPlatformPasswords();
         
         setEditingAccount(null);
@@ -278,6 +348,7 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
     try {
       await passwordsAPI.delete(parseInt(accountToDelete));
       setAccounts((prev) => prev.filter((acc) => acc.id !== accountToDelete));
+      invalidateAllPasswords();
       setDeleteModalVisible(false);
       setDeleteConfirm("");
       setAccountToDelete(null);
@@ -330,10 +401,14 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
-                value={account.username}
+                value={
+                  editingAccount?.id === account.id
+                    ? editingAccount.username
+                    : account.username
+                }
                 editable={editingAccount?.id === account.id}
                 onChangeText={(text) => {
-                  if (editingAccount) {
+                  if (editingAccount?.id === account.id) {
                     setEditingAccount({ ...editingAccount, username: text });
                   }
                 }}
@@ -344,19 +419,24 @@ export default function PasswordDetailsscreen({ navigation, route }: any) {
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
-                value={visiblePasswords[account.id] ? account.password : "••••••••"}
+                value={
+                  editingAccount?.id === account.id
+                    ? editingAccount.password
+                    : account.password
+                }
                 secureTextEntry={!visiblePasswords[account.id]}
                 editable={editingAccount?.id === account.id}
-                onChangeText={async (text) => {
-                  if (editingAccount) {
+                onChangeText={(text) => {
+                  if (editingAccount?.id === account.id) {
                     const updated = { ...editingAccount, password: text };
                     setEditingAccount(updated);
-                    // Check security in real-time as user types (debounced)
                     if (text.length >= 4) {
-                      await checkPasswordSecurity(text, editingAccount.id);
+                      schedulePasswordSecurityCheck(text, editingAccount.id);
                     }
                   }
                 }}
+                autoCapitalize="none"
+                autoCorrect={false}
               />
               <Pressable
                 style={styles.eyeButton}

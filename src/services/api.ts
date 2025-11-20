@@ -39,7 +39,7 @@ const apiRequest = async (
 ): Promise<any> => {
   const url = `${API_BASE_URL}${endpoint}`;
   
-  const headers: HeadersInit = {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string> || {}),
   };
@@ -56,15 +56,48 @@ const apiRequest = async (
     });
 
     // Security: Handle different response statuses
+    const contentType = response.headers.get("content-type") || "";
+    const hasBody =
+      response.status !== 204 &&
+      response.status !== 205 &&
+      response.headers.get("content-length") !== "0";
+
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
+      const errorText = hasBody ? await response.text() : "";
+      let errorData: any = {};
+
+      if (errorText) {
+        if (contentType.includes("application/json")) {
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { detail: errorText };
+          }
+        } else {
+          errorData = { detail: errorText };
+        }
+      }
+
       throw new Error(errorData.error || errorData.detail || `HTTP ${response.status}`);
     }
 
-    // Security: Handle empty responses
-    const contentType = response.headers.get("content-type");
-    if (contentType && contentType.includes("application/json")) {
-      return await response.json();
+    if (!hasBody) {
+      return null;
+    }
+
+    if (contentType.includes("application/json")) {
+      const text = await response.text();
+      if (!text.trim()) {
+        return null;
+      }
+      try {
+        return JSON.parse(text);
+      } catch {
+        if (__DEV__) {
+          console.log(`[API] ${endpoint} returned invalid JSON payload`);
+        }
+        return null;
+      }
     }
     
     return null;

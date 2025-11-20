@@ -6,9 +6,10 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
+  Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { securityAPI, getCurrentUser } from "../services/api";
+import { securityAPI, getCurrentUser, groupsAPI } from "../services/api";
 
 interface PasswordAnalysis {
   total_passwords: number;
@@ -28,9 +29,11 @@ export default function Securityscreen({ navigation }: any) {
   const [lastScanned, setLastScanned] = useState<string>("Just now");
   const [username, setUsername] = useState<string>("");
   const [initials, setInitials] = useState<string>("U");
+  const [groupCount, setGroupCount] = useState<number>(0);
 
   useEffect(() => {
     scanPasswords();
+    loadGroupCount();
     const u = getCurrentUser();
     const name = u?.username || "User";
     setUsername(name);
@@ -52,6 +55,16 @@ export default function Securityscreen({ navigation }: any) {
       Alert.alert("Error", error.message || "Failed to analyze passwords");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadGroupCount = async () => {
+    try {
+      const summaries = await groupsAPI.listSummaries();
+      setGroupCount(Array.isArray(summaries) ? summaries.length : 0);
+    } catch (error) {
+      console.error("Error loading groups:", error);
+      setGroupCount(0);
     }
   };
 
@@ -136,7 +149,9 @@ export default function Securityscreen({ navigation }: any) {
           </View>
           <View style={styles.summaryCard}>
             <Text style={styles.summaryIcon}>👥</Text>
-            <Text style={styles.summaryTitle}>7 Groups</Text>
+            <Text style={styles.summaryTitle}>
+              {groupCount} {groupCount === 1 ? "Group" : "Groups"}
+            </Text>
             <Text style={styles.summarySubtitle}>Secure groups</Text>
           </View>
         </View>
