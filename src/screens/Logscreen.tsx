@@ -5,7 +5,6 @@ import {
   TextInput,
   Pressable,
   StyleSheet,
-  Image,
   Alert,
   ActivityIndicator,
 } from "react-native";
@@ -106,32 +105,6 @@ export default function Logscreen({ navigation }: any) {
         )}
       </Pressable>
 
-      {/* OR Divider */}
-      <View style={styles.dividerContainer}>
-        <View style={styles.line} />
-        <Text style={styles.dividerText}>OR CONTINUE WITH</Text>
-        <View style={styles.line} />
-      </View>
-
-      {/* Authentication Options */}
-      <View style={styles.authRow}>
-        <Pressable style={styles.authBox}>
-          <Image
-            source={require("../assets/fingerprint.png")}
-            style={styles.authIcon}
-          />
-          <Text style={styles.authText}>Biometric</Text>
-        </Pressable>
-
-        <Pressable style={styles.authBox}>
-          <Image
-            source={require("../assets/facescan.png")}
-            style={styles.authIcon}
-          />
-          <Text style={styles.authText}>Face Login</Text>
-        </Pressable>
-      </View>
-
       {/* Links */}
       <View style={styles.bottomLinks}>
         <Pressable onPress={() => navigation.navigate("ForgotPassword")}>
@@ -217,55 +190,6 @@ const styles = StyleSheet.create({
   loginButtonText: {
     color: "#fff",
     fontSize: 18,
-    fontWeight: "600",
-  },
-
-  dividerContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginVertical: 25,
-  },
-
-  line: {
-    flex: 1,
-    height: 1,
-    backgroundColor: "#D5D9E2",
-  },
-
-  dividerText: {
-    marginHorizontal: 10,
-    fontSize: 12,
-    color: "#6A7181",
-    fontWeight: "600",
-  },
-
-  authRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 30,
-  },
-
-  authBox: {
-    width: "48%",
-    borderWidth: 1,
-    borderColor: "#D5D9E2",
-    borderRadius: 10,
-    paddingVertical: 12,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#F9FAFC",
-  },
-
-  authIcon: {
-    width: 32,
-    height: 32,
-    tintColor: "#1B1F3B",
-    marginBottom: 6,
-  },
-
-  authText: {
-    fontSize: 14,
-    color: "#1B1F3B",
     fontWeight: "600",
   },
 

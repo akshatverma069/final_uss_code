@@ -2,7 +2,7 @@
 Database models using SQLAlchemy ORM
 Security: Type validation, constraints, relationships
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON, LargeBinary
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -16,6 +16,7 @@ class User(Base):
     username = Column(String(255), unique=True, index=True, nullable=False)
     # Security: Password stored as hash (SHA256 format for legacy, Argon2 for new)
     pswd = Column(String(255), nullable=False)
+    encryption_salt = Column(LargeBinary(32), nullable=True)  # Made nullable for migration
     # Security: Group data stored as JSON with validation
     grp = Column(JSON, default=list)
     question_id = Column(Integer, ForeignKey("questions.question_id"), nullable=True)
@@ -93,4 +94,18 @@ class Admin(Base):
     admin_username = Column(String(255), unique=True, index=True, nullable=False)
     # Security: Admin password with strong hashing
     pswd_admin = Column(String(255), nullable=False)
+
+
+class PasswordShare(Base):
+    """Password sharing model - allows multiple passwords per user per group"""
+    __tablename__ = "password_shares"
+    
+    share_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    group_name = Column(String(500), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    password_id = Column(Integer, ForeignKey("passwords.password_id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Relationships
+    user = relationship("User", backref="shared_passwords_received")
+    password = relationship("Password", backref="shared_by_groups")
 

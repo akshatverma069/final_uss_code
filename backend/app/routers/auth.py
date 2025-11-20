@@ -47,21 +47,26 @@ async def login(
             detail="Invalid username format"
         )
     
-    # Security: Query user from database
+    # Security: Query user from database (select only needed fields to avoid issues with missing columns)
     result = await db.execute(
-        select(User).where(User.username == login_data.username)
+        select(
+            User.user_id,
+            User.username,
+            User.pswd
+        ).where(User.username == login_data.username)
     )
-    user = result.scalar_one_or_none()
+    user_row = result.first()
     
-    # Security: Generic error message to prevent username enumeration
-    if user is None:
+    if user_row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password"
         )
     
+    user_id, username, hashed_password = user_row
+    
     # Security: Verify password
-    if not verify_password(login_data.password, user.pswd):
+    if not verify_password(login_data.password, hashed_password):
         # Security: Log failed login attempt
         print(f"[SECURITY] Failed login attempt for username: {login_data.username}")
         raise HTTPException(
@@ -71,15 +76,15 @@ async def login(
     
     # Security: Create access token
     access_token = create_access_token(
-        data={"user_id": user.user_id, "username": user.username},
+        data={"user_id": user_id, "username": username},
         expires_delta=timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     
     return TokenResponse(
         access_token=access_token,
         token_type="bearer",
-        user_id=user.user_id,
-        username=user.username
+        user_id=user_id,
+        username=username
     )
 
 

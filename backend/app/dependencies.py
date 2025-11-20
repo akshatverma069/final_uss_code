@@ -41,8 +41,42 @@ async def get_current_user(
         )
     
     # Security: Verify user exists in database
-    result = await db.execute(select(User).where(User.user_id == user_id))
-    user = result.scalar_one_or_none()
+    # Handle missing encryption_salt column gracefully during migration
+    try:
+        result = await db.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+    except Exception as e:
+        # If encryption_salt column doesn't exist, select without it
+        error_str = str(e).lower()
+        if "encryption_salt" in error_str or "1054" in error_str:
+            result = await db.execute(
+                select(
+                    User.user_id,
+                    User.username,
+                    User.pswd,
+                    User.grp,
+                    User.question_id,
+                    User.answers
+                ).where(User.user_id == user_id)
+            )
+            user_row = result.first()
+            if user_row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User not found",
+                )
+            # Create User object without encryption_salt
+            user = User(
+                user_id=user_row.user_id,
+                username=user_row.username,
+                pswd=user_row.pswd,
+                grp=user_row.grp,
+                question_id=user_row.question_id,
+                answers=user_row.answers,
+                encryption_salt=None
+            )
+        else:
+            raise
     
     if user is None:
         raise HTTPException(

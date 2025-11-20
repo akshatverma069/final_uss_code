@@ -4,13 +4,13 @@ Security: Group operations with authorization checks
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, func, delete
+from sqlalchemy import select, and_, or_, func, delete, text
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
 from app.database import get_db
-from app.models import User, GroupMember, Password
+from app.models import User, GroupMember, Password, PasswordShare
 from app.schemas import GroupMemberResponse, GroupShareRequest
 from app.dependencies import get_current_user
 from app.security import sanitize_input, load_user_aes_key, aes_decrypt, aes_encrypt
@@ -156,7 +156,7 @@ async def share_password(
             detail="Only group admins can share passwords"
         )
     
-    # Security: Share password with specified users
+    # Security: Share password with specified users using password_shares table
     for user_id in share_data.user_ids:
         # Security: Verify user is member of the group
         result = await db.execute(
@@ -169,18 +169,72 @@ async def share_password(
         )
         member = result.scalar_one_or_none()
         
-        if member:
-            # Security: Update password_id for member
-            member.password_id = share_data.password_id
-        else:
-            # Security: Create new group member
+        if not member:
+            # Security: Create new group member if they don't exist
             new_member = GroupMember(
                 group_name=share_data.group_name,
                 user_id=user_id,
                 admin_status=False,
-                password_id=share_data.password_id
+                password_id=None  # Don't use legacy field
             )
             db.add(new_member)
+        
+        # Security: Check if password is already shared with this user in this group
+        try:
+            existing_share = await db.execute(
+                select(PasswordShare).where(
+                    and_(
+                        PasswordShare.group_name == share_data.group_name,
+                        PasswordShare.user_id == user_id,
+                        PasswordShare.password_id == share_data.password_id
+                    )
+                )
+            )
+            if existing_share.scalar_one_or_none() is None:
+                # Security: Create new password share entry
+                new_share = PasswordShare(
+                    group_name=share_data.group_name,
+                    user_id=user_id,
+                    password_id=share_data.password_id
+                )
+                db.add(new_share)
+        except Exception as share_error:
+            # If password_shares table doesn't exist, create it first
+            error_str = str(share_error).lower()
+            if "doesn't exist" in error_str or "unknown table" in error_str or "1146" in error_str:
+                try:
+                    # Create the table
+                    await db.execute(text("""
+                        CREATE TABLE IF NOT EXISTS password_shares (
+                            share_id INT AUTO_INCREMENT PRIMARY KEY,
+                            group_name VARCHAR(500) NOT NULL,
+                            user_id INT NOT NULL,
+                            password_id INT NOT NULL,
+                            INDEX idx_group_name (group_name),
+                            INDEX idx_user_id (user_id),
+                            INDEX idx_password_id (password_id),
+                            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                            FOREIGN KEY (password_id) REFERENCES passwords(password_id) ON DELETE CASCADE,
+                            UNIQUE KEY unique_share (group_name, user_id, password_id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    await db.commit()
+                    # Now try to add the share again
+                    new_share = PasswordShare(
+                        group_name=share_data.group_name,
+                        user_id=user_id,
+                        password_id=share_data.password_id
+                    )
+                    db.add(new_share)
+                except Exception as create_error:
+                    print(f"Error creating password_shares table during share: {create_error}")
+                    # Fallback to old method only if table creation fails
+                    if member:
+                        member.password_id = share_data.password_id
+            else:
+                # For other errors, fall back to old method
+                if member:
+                    member.password_id = share_data.password_id
     
     await db.commit()
     
@@ -249,66 +303,128 @@ async def get_shared_passwords(
     Get passwords shared with current user by group admins
     Security: Authentication required, non-admin check
     """
-    # Security: Query shared passwords for non-admin users
-    result = await db.execute(
-        select(
-            Password.password_id,
-            Password.user_id,  # Get password owner's user_id
-            Password.application_name,
-            Password.account_user_name,
-            Password.application_password,
-            GroupMember.group_name,
-        )
-        .join(GroupMember, Password.password_id == GroupMember.password_id)
-        .where(
-            and_(
-                GroupMember.user_id == current_user.user_id,
-                GroupMember.password_id.isnot(None),
+    # Security: Query shared passwords for non-admin users from password_shares table
+    # This table supports multiple passwords per user per group
+    try:
+        # Try to query from password_shares table (supports multiple passwords)
+        # This returns ALL passwords shared with the current user (receiver view)
+        result = await db.execute(
+            select(
+                Password.password_id,
+                Password.user_id,  # Get password owner's user_id
+                Password.application_name,
+                Password.account_user_name,
+                Password.application_password,
+                PasswordShare.group_name,
             )
+            .join(PasswordShare, Password.password_id == PasswordShare.password_id)
+            .where(
+                PasswordShare.user_id == current_user.user_id
+            )
+            .order_by(PasswordShare.share_id.desc())  # Order by share_id to get all results
         )
-    )
-
-    shared = result.all()
+        shared = result.all()
+    except Exception as e:
+        # If password_shares table doesn't exist, try to create it and migrate data
+        error_str = str(e).lower()
+        if "doesn't exist" in error_str or "unknown table" in error_str or "1146" in error_str:
+            try:
+                # Create the table
+                await db.execute(text("""
+                    CREATE TABLE IF NOT EXISTS password_shares (
+                        share_id INT AUTO_INCREMENT PRIMARY KEY,
+                        group_name VARCHAR(500) NOT NULL,
+                        user_id INT NOT NULL,
+                        password_id INT NOT NULL,
+                        INDEX idx_group_name (group_name),
+                        INDEX idx_user_id (user_id),
+                        INDEX idx_password_id (password_id),
+                        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                        FOREIGN KEY (password_id) REFERENCES passwords(password_id) ON DELETE CASCADE,
+                        UNIQUE KEY unique_share (group_name, user_id, password_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """))
+                # Migrate existing data
+                await db.execute(text("""
+                    INSERT IGNORE INTO password_shares (group_name, user_id, password_id)
+                    SELECT group_name, user_id, password_id
+                    FROM group_members
+                    WHERE password_id IS NOT NULL
+                """))
+                await db.commit()
+                # Retry the query - return ALL passwords shared with current user
+                result = await db.execute(
+                    select(
+                        Password.password_id,
+                        Password.user_id,
+                        Password.application_name,
+                        Password.account_user_name,
+                        Password.application_password,
+                        PasswordShare.group_name,
+                    )
+                    .join(PasswordShare, Password.password_id == PasswordShare.password_id)
+                    .where(
+                        PasswordShare.user_id == current_user.user_id
+                    )
+                    .order_by(PasswordShare.share_id.desc())  # Order by share_id to get all results
+                )
+                shared = result.all()
+            except Exception as create_error:
+                print(f"Error creating password_shares table: {create_error}")
+                shared = []
+        else:
+            print(f"Error querying password_shares table: {e}")
+            shared = []
     
-    # Security: Load recipient's (current_user) AES key for re-encryption
-    recipient_aes_key = load_user_aes_key(current_user.user_id)
-    if not recipient_aes_key:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Encryption key not found. Please contact support."
-        )
-    
-    # Security: Decrypt with owner's key, then re-encrypt with recipient's key
-    encrypted_shared = []
+    # Security: Decrypt with owner's key and return plaintext
+    # If decryption fails or keys aren't available, return data as-is
+    decrypted_shared = []
     for password_id, owner_user_id, application_name, account_user_name, application_password, group_name in shared:
         try:
             # Security: Load password owner's AES key
             owner_aes_key = load_user_aes_key(owner_user_id)
             if owner_aes_key:
-                # Security: Decrypt with owner's key
-                decrypted_password = aes_decrypt(application_password, owner_aes_key)
-                decrypted_username = aes_decrypt(account_user_name, owner_aes_key)
-                
-                # Security: Re-encrypt with recipient's key for secure transmission
-                recipient_encrypted_password = aes_encrypt(decrypted_password, recipient_aes_key)
-                recipient_encrypted_username = aes_encrypt(decrypted_username, recipient_aes_key)
-                
-                encrypted_shared.append({
+                try:
+                    # Security: Decrypt with owner's key and return plaintext
+                    decrypted_password = aes_decrypt(application_password, owner_aes_key)
+                    decrypted_username = aes_decrypt(account_user_name, owner_aes_key)
+                    
+                    decrypted_shared.append({
+                        "password_id": password_id,
+                        "application_name": application_name,
+                        "account_user_name": decrypted_username,  # Return decrypted plaintext
+                        "application_password": decrypted_password,  # Return decrypted plaintext
+                        "group_name": group_name,
+                    })
+                except (ValueError, Exception):
+                    # If decryption fails, return as-is (might already be plaintext)
+                    decrypted_shared.append({
+                        "password_id": password_id,
+                        "application_name": application_name,
+                        "account_user_name": account_user_name,
+                        "application_password": application_password,
+                        "group_name": group_name,
+                    })
+            else:
+                # Fallback: return as-is if key not found (might be plaintext)
+                decrypted_shared.append({
                     "password_id": password_id,
                     "application_name": application_name,
-                    "account_user_name": recipient_encrypted_username,  # Encrypted with recipient's key
-                    "application_password": recipient_encrypted_password,  # Encrypted with recipient's key
+                    "account_user_name": account_user_name,
+                    "application_password": application_password,
                     "group_name": group_name,
-                    "encrypted": True  # Flag to indicate client needs to decrypt
                 })
-            else:
-                # Security: Skip if owner key not found
-                continue
-        except ValueError:
-            # Security: Skip if decryption fails
-            continue
+        except Exception as e:
+            # Fallback: return as-is if any error occurs
+            decrypted_shared.append({
+                "password_id": password_id,
+                "application_name": application_name,
+                "account_user_name": account_user_name,
+                "application_password": application_password,
+                "group_name": group_name,
+            })
 
-    return encrypted_shared
+    return decrypted_shared
 
 
 @router.get("/{group_name}/shared/passwords", response_model=List[dict])
@@ -334,64 +450,141 @@ async def get_group_shared_passwords(
     if not admin_entry:
         raise HTTPException(status_code=403, detail="Only admins can view shared passwords")
 
-    result = await db.execute(
-        select(
-            Password,
-            GroupMember.user_id,
-            GroupMember.admin_status,
-            User.username,
+    # Query from password_shares table to get ALL shared passwords in the group
+    # Handle case where password_shares table might not exist
+    try:
+        result = await db.execute(
+            select(
+                Password,
+                PasswordShare.user_id,
+                User.username,
+                GroupMember.admin_status,
+            )
+            .join(PasswordShare, Password.password_id == PasswordShare.password_id)
+            .join(User, User.user_id == PasswordShare.user_id)
+            .outerjoin(
+                GroupMember,
+                and_(
+                    GroupMember.group_name == group_name,
+                    GroupMember.user_id == PasswordShare.user_id
+                )
+            )
+            .where(
+                PasswordShare.group_name == group_name
+            )
+            .order_by(PasswordShare.share_id.desc())  # Order by share_id to get all results
         )
-        .join(GroupMember, Password.password_id == GroupMember.password_id)
-        .join(User, User.user_id == GroupMember.user_id)
-        .where(
-            GroupMember.group_name == group_name,
-            GroupMember.password_id.isnot(None),
-        )
-    )
-
-    rows = result.all()
+        rows = result.all()
+    except Exception as e:
+        # If password_shares table doesn't exist, create it and migrate data
+        error_str = str(e).lower()
+        if "doesn't exist" in error_str or "unknown table" in error_str or "1146" in error_str:
+            try:
+                await db.execute(text("""
+                    CREATE TABLE IF NOT EXISTS password_shares (
+                        share_id INT AUTO_INCREMENT PRIMARY KEY,
+                        group_name VARCHAR(500) NOT NULL,
+                        user_id INT NOT NULL,
+                        password_id INT NOT NULL,
+                        INDEX idx_group_name (group_name),
+                        INDEX idx_user_id (user_id),
+                        INDEX idx_password_id (password_id),
+                        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                        FOREIGN KEY (password_id) REFERENCES passwords(password_id) ON DELETE CASCADE,
+                        UNIQUE KEY unique_share (group_name, user_id, password_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """))
+                await db.execute(text("""
+                    INSERT IGNORE INTO password_shares (group_name, user_id, password_id)
+                    SELECT group_name, user_id, password_id
+                    FROM group_members
+                    WHERE password_id IS NOT NULL
+                """))
+                await db.commit()
+                # Retry the query
+                result = await db.execute(
+                    select(
+                        Password,
+                        PasswordShare.user_id,
+                        User.username,
+                        GroupMember.admin_status,
+                    )
+                    .join(PasswordShare, Password.password_id == PasswordShare.password_id)
+                    .join(User, User.user_id == PasswordShare.user_id)
+                    .outerjoin(
+                        GroupMember,
+                        and_(
+                            GroupMember.group_name == group_name,
+                            GroupMember.user_id == PasswordShare.user_id
+                        )
+                    )
+                    .where(
+                        PasswordShare.group_name == group_name
+                    )
+                    .order_by(PasswordShare.share_id.desc())  # Order by share_id to get all results
+                )
+                rows = result.all()
+            except Exception as create_error:
+                print(f"Error creating password_shares table in get_group_shared_passwords: {create_error}")
+                rows = []
+        else:
+            print(f"Error querying password_shares in get_group_shared_passwords: {e}")
+            rows = []
     password_map: Dict[int, Dict[str, Any]] = {}
     
-    # Security: Load password owner's AES key (all passwords in group belong to same owner)
-    owner_aes_key = None
-    if rows:
-        first_password = rows[0][0]
-        owner_aes_key = load_user_aes_key(first_password.user_id)
-        if not owner_aes_key:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Encryption key not found for password owner."
-            )
-    
-    # Security: For admin view, we can show decrypted passwords (admin has access)
-    # But for better security, we could also encrypt with admin's key
-    # For now, keeping decrypted for admin convenience, but this could be changed
-    for password, member_user_id, admin_status, username in rows:
+    # Security: Decrypt passwords for admin view
+    for password, share_user_id, username, admin_status in rows:
         try:
-            # Security: Decrypt password data for admin view
-            decrypted_password = aes_decrypt(password.application_password, owner_aes_key)
-            decrypted_username = aes_decrypt(password.account_user_name, owner_aes_key)
+            # Security: Load password owner's AES key
+            owner_aes_key = load_user_aes_key(password.user_id)
+            if owner_aes_key:
+                # Security: Decrypt password data for admin view
+                decrypted_password = aes_decrypt(password.application_password, owner_aes_key)
+                decrypted_username = aes_decrypt(password.account_user_name, owner_aes_key)
+            else:
+                # Fallback: use as-is if key not found
+                decrypted_password = password.application_password
+                decrypted_username = password.account_user_name
             
             entry = password_map.setdefault(
                 password.password_id,
                 {
                     "password_id": password.password_id,
                     "application_name": password.application_name,
-                    "account_user_name": decrypted_username,
-                    "application_password": decrypted_password,
+                    "account_user_name": decrypted_username,  # Return decrypted plaintext
+                    "application_password": decrypted_password,  # Return decrypted plaintext
                     "shared_with": [],
                 },
             )
-            entry["shared_with"].append(
+            # Avoid duplicate entries
+            if not any(sw["user_id"] == share_user_id for sw in entry["shared_with"]):
+                entry["shared_with"].append(
+                    {
+                        "user_id": share_user_id,
+                        "username": username,
+                        "is_admin": bool(admin_status) if admin_status is not None else False,
+                    }
+                )
+        except (ValueError, Exception) as e:
+            # Fallback: use as-is if decryption fails
+            entry = password_map.setdefault(
+                password.password_id,
                 {
-                    "user_id": member_user_id,
-                    "username": username,
-                    "is_admin": bool(admin_status),
-                }
+                    "password_id": password.password_id,
+                    "application_name": password.application_name,
+                    "account_user_name": password.account_user_name,
+                    "application_password": password.application_password,
+                    "shared_with": [],
+                },
             )
-        except ValueError:
-            # Security: Skip if decryption fails
-            continue
+            if not any(sw["user_id"] == share_user_id for sw in entry["shared_with"]):
+                entry["shared_with"].append(
+                    {
+                        "user_id": share_user_id,
+                        "username": username,
+                        "is_admin": bool(admin_status) if admin_status is not None else False,
+                    }
+                )
 
     return list(password_map.values())
 
@@ -562,7 +755,28 @@ async def share_password_to_all(
         select(GroupMember).where(GroupMember.group_name == body.group_name)
     )
     for member in members.scalars().all():
-        member.password_id = body.password_id
+        # Use password_shares table to support multiple passwords per user per group
+        try:
+            # Check if already shared
+            existing_share = await db.execute(
+                select(PasswordShare).where(
+                    and_(
+                        PasswordShare.group_name == body.group_name,
+                        PasswordShare.user_id == member.user_id,
+                        PasswordShare.password_id == body.password_id
+                    )
+                )
+            )
+            if existing_share.scalar_one_or_none() is None:
+                new_share = PasswordShare(
+                    group_name=body.group_name,
+                    user_id=member.user_id,
+                    password_id=body.password_id
+                )
+                db.add(new_share)
+        except Exception:
+            # Fallback to old method if password_shares table doesn't exist
+            member.password_id = body.password_id
 
     await db.commit()
     return {"success": True, "message": "Password shared with all members"}
