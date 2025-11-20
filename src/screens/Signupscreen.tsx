@@ -203,27 +203,6 @@ const handleSignup = async () => {
         />
       </View>
 
-      {/* Biometric + FaceScan */}
-      <View style={styles.authRow}>
-        <Pressable style={styles.authBox}>
-          <Image
-            source={require("../assets/fingerprint.png")}
-            style={styles.authIcon}
-          />
-          <Text style={styles.authText}>Setup Biometric</Text>
-        </Pressable>
-
-        <View style={styles.verticalDivider} />
-
-        <Pressable style={styles.authBox}>
-          <Image
-            source={require("../assets/facescan.png")}
-            style={styles.authIcon}
-          />
-          <Text style={styles.authText}>Setup FaceScan</Text>
-        </Pressable>
-      </View>
-
       {/* Security Question */}
       <Text style={styles.inputLabel}>Security Question</Text>
       <View style={styles.pickerContainer}>

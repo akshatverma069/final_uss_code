@@ -92,29 +92,23 @@ export default function GroupDetailsscreen({ navigation, route }: any) {
     }
     setSharedLoading(true);
     try {
+      let data: any[];
       if (isAdmin) {
-        const data = await groupsAPI.getGroupSharedPasswords(group.name);
-        const formatted: SharedPasswordSummary[] = data.map((item: any) => ({
-          id: String(item.password_id),
-          applicationName: item.application_name,
-          accountUserName: item.account_user_name,
-          password: item.application_password || "",
-          sharedWith: item.shared_with || [],
-        }));
-        setSharedPasswords(formatted);
+        data = await groupsAPI.getGroupSharedPasswords(group.name);
       } else {
-        const data = await groupsAPI.getSharedPasswords();
-        const formatted: SharedPasswordSummary[] = data
-          .filter((item: any) => item.group_name === group.name)
-          .map((item: any) => ({
-            id: String(item.password_id),
-            applicationName: item.application_name,
-            accountUserName: item.account_user_name,
-            password: item.application_password || "",
-            sharedWith: [],
-          }));
-        setSharedPasswords(formatted);
+        const allShared = await groupsAPI.getSharedPasswords();
+        data = allShared.filter((item: any) => item.group_name === group.name);
       }
+
+      // Backend now returns decrypted plaintext values
+      const formatted: SharedPasswordSummary[] = data.map((item: any) => ({
+        id: String(item.password_id),
+        applicationName: item.application_name || "",
+        accountUserName: item.account_user_name || "",
+        password: item.application_password || "",
+        sharedWith: item.shared_with || [],
+      }));
+      setSharedPasswords(formatted);
     } catch (err: any) {
       console.error("Failed to load shared passwords:", err);
       setSharedPasswords([]);

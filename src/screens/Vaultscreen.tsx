@@ -91,11 +91,12 @@ export default function Vaultscreen({ navigation, route }: any) {
   const loadSharedPasswords = useCallback(async () => {
     try {
       const data = await groupsAPI.getSharedPasswords();
+      // Backend now returns decrypted plaintext values
       const formatted: SharedPasswordEntry[] = data.map((item: any, index: number) => ({
         id: `${item.group_name}-${item.password_id}-${index}`,
         groupName: item.group_name,
-        applicationName: item.application_name,
-        accountUserName: item.account_user_name,
+        applicationName: item.application_name || "",
+        accountUserName: item.account_user_name || "",
         password: item.application_password || "",
       }));
       setSharedPasswords(formatted);
