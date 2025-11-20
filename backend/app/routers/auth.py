@@ -160,17 +160,46 @@ async def signup(
     encrypted_answer = aes_encrypt(signup_data.answer, aes_key)
     
     # Security: Create user with hashed password and encrypted answer
+    # Use direct INSERT since encryption_salt column is not used
+    from sqlalchemy import text
+    
+    # Use direct SQL INSERT without encryption_salt
+    result = await db.execute(
+        text("""
+            INSERT INTO users (username, pswd, question_id, answers, grp)
+            VALUES (:username, :pswd, :question_id, :answers, :grp)
+        """),
+        {
+            "username": signup_data.username,
+            "pswd": hashed_password,
+            "question_id": signup_data.question_id,
+            "answers": json.dumps([encrypted_answer]),
+            "grp": json.dumps([])
+        }
+    )
+    await db.commit()
+    
+    # Get the inserted user_id
+    user_result = await db.execute(
+        text("SELECT user_id FROM users WHERE username = :username"),
+        {"username": signup_data.username}
+    )
+    user_row = user_result.first()
+    if not user_row:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user"
+        )
+    
+    # Create a User object for the response (without encryption_salt)
     new_user = User(
+        user_id=user_row.user_id,
         username=signup_data.username,
         pswd=hashed_password,
         question_id=signup_data.question_id,
-        answers=json.dumps([encrypted_answer]),  # Store encrypted answer
+        answers=json.dumps([encrypted_answer]),
         grp=json.dumps([])
     )
-    
-    db.add(new_user)
-    await db.commit()
-    await db.refresh(new_user)
     
     # Security: Save AES key locally (not in database)
     if not save_user_aes_key(new_user.user_id, aes_key):

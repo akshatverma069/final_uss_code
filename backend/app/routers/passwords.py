@@ -61,19 +61,108 @@ async def create_password(
     
     try:
         # Security: Create password entry with encrypted data
+        # Use direct INSERT to handle password_id AUTO_INCREMENT properly
+        from sqlalchemy import text
+        
+        # Try to get the next password_id if AUTO_INCREMENT is not set
+        try:
+            # First, try INSERT without password_id (if AUTO_INCREMENT is set)
+            result = await db.execute(
+                text("""
+                    INSERT INTO passwords (user_id, application_name, application_type, account_user_name, application_password, datetime_added, pswd_strength, year1, year2, year3, year4, year5)
+                    VALUES (:user_id, :application_name, :application_type, :account_user_name, :application_password, :datetime_added, :pswd_strength, :year1, :year2, :year3, :year4, :year5)
+                """),
+                {
+                    "user_id": current_user.user_id,
+                    "application_name": application_name,
+                    "application_type": application_type,
+                    "account_user_name": encrypted_username,
+                    "application_password": encrypted_password,
+                    "datetime_added": datetime.utcnow(),
+                    "pswd_strength": strength,
+                    "year1": None,
+                    "year2": None,
+                    "year3": None,
+                    "year4": None,
+                    "year5": None
+                }
+            )
+            await db.commit()
+            
+            # Get the inserted password_id using LAST_INSERT_ID() or by querying
+            password_result = await db.execute(
+                text("SELECT LAST_INSERT_ID() as password_id")
+            )
+            last_id_row = password_result.first()
+            if last_id_row and last_id_row.password_id:
+                password_id = last_id_row.password_id
+            else:
+                # Fallback: get the max password_id for this user
+                password_result = await db.execute(
+                    text("SELECT password_id FROM passwords WHERE user_id = :user_id ORDER BY password_id DESC LIMIT 1"),
+                    {"user_id": current_user.user_id}
+                )
+                password_row = password_result.first()
+                if not password_row:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to create password"
+                    )
+                password_id = password_row.password_id
+        except Exception as insert_error:
+            # If AUTO_INCREMENT is not set, manually get next ID
+            error_str = str(insert_error).lower()
+            if "doesn't have a default value" in error_str or "1364" in error_str:
+                await db.rollback()
+                # Get the max password_id and add 1
+                max_id_result = await db.execute(
+                    text("SELECT COALESCE(MAX(password_id), 0) + 1 as next_id FROM passwords")
+                )
+                max_id_row = max_id_result.first()
+                if not max_id_row:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to create password"
+                    )
+                password_id = max_id_row.next_id
+                
+                # Insert with explicit password_id
+                result = await db.execute(
+                    text("""
+                        INSERT INTO passwords (password_id, user_id, application_name, application_type, account_user_name, application_password, datetime_added, pswd_strength, year1, year2, year3, year4, year5)
+                        VALUES (:password_id, :user_id, :application_name, :application_type, :account_user_name, :application_password, :datetime_added, :pswd_strength, :year1, :year2, :year3, :year4, :year5)
+                    """),
+                    {
+                        "password_id": password_id,
+                        "user_id": current_user.user_id,
+                        "application_name": application_name,
+                        "application_type": application_type,
+                        "account_user_name": encrypted_username,
+                        "application_password": encrypted_password,
+                        "datetime_added": datetime.utcnow(),
+                        "pswd_strength": strength,
+                        "year1": None,
+                        "year2": None,
+                        "year3": None,
+                        "year4": None,
+                        "year5": None
+                    }
+                )
+                await db.commit()
+            else:
+                raise
+        
+        # Create Password object for response
         new_password = Password(
+            password_id=password_id,
             user_id=current_user.user_id,
             application_name=application_name,
             application_type=application_type,
-            account_user_name=encrypted_username,  # Store encrypted username
-            application_password=encrypted_password,  # Store encrypted password
+            account_user_name=encrypted_username,
+            application_password=encrypted_password,
             pswd_strength=strength,
             datetime_added=datetime.utcnow()
         )
-        
-        db.add(new_password)
-        await db.commit()
-        await db.refresh(new_password)
         
         return PasswordResponse.model_validate(new_password)
     except Exception as e:

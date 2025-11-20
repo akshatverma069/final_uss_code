@@ -33,7 +33,7 @@ answer text
 );
 
 create table passwords(
-password_id int primary key,
+password_id int AUTO_INCREMENT PRIMARY KEY,
 user_id int,
 application_name text,
 application_type text,
