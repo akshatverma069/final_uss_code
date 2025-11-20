@@ -13,7 +13,7 @@ from app.database import get_db
 from app.models import User, GroupMember, Password
 from app.schemas import GroupMemberResponse, GroupShareRequest
 from app.dependencies import get_current_user
-from app.security import sanitize_input
+from app.security import sanitize_input, load_user_aes_key, aes_decrypt, aes_encrypt
 from app.config import settings
 
 router = APIRouter(prefix="/api/groups", tags=["Groups"])
@@ -253,6 +253,7 @@ async def get_shared_passwords(
     result = await db.execute(
         select(
             Password.password_id,
+            Password.user_id,  # Get password owner's user_id
             Password.application_name,
             Password.account_user_name,
             Password.application_password,
@@ -268,17 +269,46 @@ async def get_shared_passwords(
     )
 
     shared = result.all()
+    
+    # Security: Load recipient's (current_user) AES key for re-encryption
+    recipient_aes_key = load_user_aes_key(current_user.user_id)
+    if not recipient_aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
+    # Security: Decrypt with owner's key, then re-encrypt with recipient's key
+    encrypted_shared = []
+    for password_id, owner_user_id, application_name, account_user_name, application_password, group_name in shared:
+        try:
+            # Security: Load password owner's AES key
+            owner_aes_key = load_user_aes_key(owner_user_id)
+            if owner_aes_key:
+                # Security: Decrypt with owner's key
+                decrypted_password = aes_decrypt(application_password, owner_aes_key)
+                decrypted_username = aes_decrypt(account_user_name, owner_aes_key)
+                
+                # Security: Re-encrypt with recipient's key for secure transmission
+                recipient_encrypted_password = aes_encrypt(decrypted_password, recipient_aes_key)
+                recipient_encrypted_username = aes_encrypt(decrypted_username, recipient_aes_key)
+                
+                encrypted_shared.append({
+                    "password_id": password_id,
+                    "application_name": application_name,
+                    "account_user_name": recipient_encrypted_username,  # Encrypted with recipient's key
+                    "application_password": recipient_encrypted_password,  # Encrypted with recipient's key
+                    "group_name": group_name,
+                    "encrypted": True  # Flag to indicate client needs to decrypt
+                })
+            else:
+                # Security: Skip if owner key not found
+                continue
+        except ValueError:
+            # Security: Skip if decryption fails
+            continue
 
-    return [
-        {
-            "password_id": password_id,
-            "application_name": application_name,
-            "account_user_name": account_user_name,
-            "application_password": application_password,
-            "group_name": group_name,
-        }
-        for password_id, application_name, account_user_name, application_password, group_name in shared
-    ]
+    return encrypted_shared
 
 
 @router.get("/{group_name}/shared/passwords", response_model=List[dict])
@@ -321,24 +351,47 @@ async def get_group_shared_passwords(
 
     rows = result.all()
     password_map: Dict[int, Dict[str, Any]] = {}
+    
+    # Security: Load password owner's AES key (all passwords in group belong to same owner)
+    owner_aes_key = None
+    if rows:
+        first_password = rows[0][0]
+        owner_aes_key = load_user_aes_key(first_password.user_id)
+        if not owner_aes_key:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Encryption key not found for password owner."
+            )
+    
+    # Security: For admin view, we can show decrypted passwords (admin has access)
+    # But for better security, we could also encrypt with admin's key
+    # For now, keeping decrypted for admin convenience, but this could be changed
     for password, member_user_id, admin_status, username in rows:
-        entry = password_map.setdefault(
-            password.password_id,
-            {
-                "password_id": password.password_id,
-                "application_name": password.application_name,
-                "account_user_name": password.account_user_name,
-                "application_password": password.application_password,
-                "shared_with": [],
-            },
-        )
-        entry["shared_with"].append(
-            {
-                "user_id": member_user_id,
-                "username": username,
-                "is_admin": bool(admin_status),
-            }
-        )
+        try:
+            # Security: Decrypt password data for admin view
+            decrypted_password = aes_decrypt(password.application_password, owner_aes_key)
+            decrypted_username = aes_decrypt(password.account_user_name, owner_aes_key)
+            
+            entry = password_map.setdefault(
+                password.password_id,
+                {
+                    "password_id": password.password_id,
+                    "application_name": password.application_name,
+                    "account_user_name": decrypted_username,
+                    "application_password": decrypted_password,
+                    "shared_with": [],
+                },
+            )
+            entry["shared_with"].append(
+                {
+                    "user_id": member_user_id,
+                    "username": username,
+                    "is_admin": bool(admin_status),
+                }
+            )
+        except ValueError:
+            # Security: Skip if decryption fails
+            continue
 
     return list(password_map.values())
 

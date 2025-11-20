@@ -16,7 +16,9 @@ from app.schemas import (
 )
 from app.security import (
     verify_password, get_password_hash, create_access_token,
-    validate_password, validate_username, calculate_password_strength
+    validate_password, validate_username, calculate_password_strength,
+    generate_aes_key, save_user_aes_key, load_user_aes_key,
+    aes_encrypt, aes_decrypt
 )
 from app.dependencies import security
 from app.config import settings
@@ -134,18 +136,33 @@ async def signup(
     # Security: Hash password with Argon2
     hashed_password = get_password_hash(signup_data.password)
     
-    # Security: Create user with hashed password
+    # Security: Generate unique AES key for this user
+    aes_key = generate_aes_key()
+    
+    # Security: Encrypt security question answer with user's AES key
+    encrypted_answer = aes_encrypt(signup_data.answer, aes_key)
+    
+    # Security: Create user with hashed password and encrypted answer
     new_user = User(
         username=signup_data.username,
         pswd=hashed_password,
         question_id=signup_data.question_id,
-        answers=json.dumps([signup_data.answer]),
+        answers=json.dumps([encrypted_answer]),  # Store encrypted answer
         grp=json.dumps([])
     )
     
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
+    
+    # Security: Save AES key locally (not in database)
+    if not save_user_aes_key(new_user.user_id, aes_key):
+        # Security: If key save fails, rollback user creation
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to initialize user encryption. Please try again."
+        )
     
     # Security: Create access token
     access_token = create_access_token(
@@ -200,12 +217,27 @@ async def forgot_password(
             detail="User not found or question mismatch"
         )
     
-    # Security: Verify answer
+    # Security: Load user's AES key and decrypt answers
+    aes_key = load_user_aes_key(user.user_id)
+    if not aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
+    # Security: Decrypt and verify answer
     try:
-        answers = json.loads(user.answers or "[]")
-    except (json.JSONDecodeError, TypeError):
-        answers = [user.answers] if user.answers else []
-    if forgot_data.answer not in answers:
+        answers_json = json.loads(user.answers or "[]")
+        decrypted_answers = [aes_decrypt(encrypted_ans, aes_key) for encrypted_ans in answers_json]
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # Security: Handle legacy unencrypted answers
+        try:
+            answers_json = json.loads(user.answers or "[]")
+            decrypted_answers = answers_json
+        except:
+            decrypted_answers = [user.answers] if user.answers else []
+    
+    if forgot_data.answer not in decrypted_answers:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect answer"
@@ -252,11 +284,27 @@ async def reset_password(
         verified = verify_password(reset_data.current_password, user.pswd)
     elif reset_data.question_id and reset_data.answer:
         if user.question_id == reset_data.question_id:
-            try:
-                answers = json.loads(user.answers or "[]")
-            except (json.JSONDecodeError, TypeError):
-                answers = [user.answers] if user.answers else []
-            verified = reset_data.answer in answers
+            # Security: Load user's AES key and decrypt answers
+            aes_key = load_user_aes_key(user.user_id)
+            if aes_key:
+                try:
+                    answers_json = json.loads(user.answers or "[]")
+                    decrypted_answers = [aes_decrypt(encrypted_ans, aes_key) for encrypted_ans in answers_json]
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    # Security: Handle legacy unencrypted answers
+                    try:
+                        answers_json = json.loads(user.answers or "[]")
+                        decrypted_answers = answers_json
+                    except:
+                        decrypted_answers = [user.answers] if user.answers else []
+                verified = reset_data.answer in decrypted_answers
+            else:
+                # Security: Fallback for users without AES key (legacy)
+                try:
+                    answers = json.loads(user.answers or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    answers = [user.answers] if user.answers else []
+                verified = reset_data.answer in answers
     
     if not verified:
         raise HTTPException(

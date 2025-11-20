@@ -8,6 +8,14 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from passlib.hash import argon2, bcrypt
 import re
+import os
+import base64
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+import secrets
 from app.config import settings
 
 # Security: Password hashing context with Argon2 (winner of PHC)
@@ -202,4 +210,160 @@ def validate_username(username: str) -> bool:
         return False
     
     return True
+
+
+# Security: AES Encryption/Decryption Functions
+def generate_aes_key() -> bytes:
+    """
+    Generate a random AES-256 key (32 bytes)
+    Security: Cryptographically secure random key generation
+    """
+    return secrets.token_bytes(32)
+
+
+def aes_encrypt(plaintext: str, key: bytes) -> str:
+    """
+    Encrypt plaintext using AES-256-CBC
+    Security: AES encryption with IV for each encryption
+    """
+    if not plaintext:
+        return ""
+    
+    try:
+        # Security: Generate random IV for each encryption
+        iv = secrets.token_bytes(16)
+        
+        # Security: Create cipher with AES-256-CBC
+        cipher = Cipher(
+            algorithms.AES(key),
+            modes.CBC(iv),
+            backend=default_backend()
+        )
+        encryptor = cipher.encryptor()
+        
+        # Security: Pad plaintext to block size
+        padder = padding.PKCS7(128).padder()
+        padded_data = padder.update(plaintext.encode('utf-8'))
+        padded_data += padder.finalize()
+        
+        # Security: Encrypt
+        ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+        
+        # Security: Combine IV and ciphertext, then base64 encode
+        encrypted_data = iv + ciphertext
+        return base64.b64encode(encrypted_data).decode('utf-8')
+    except Exception as e:
+        # Security: Log error but don't expose details
+        print(f"[SECURITY] Encryption error: {str(e)}")
+        raise ValueError("Encryption failed")
+
+
+def aes_decrypt(ciphertext: str, key: bytes) -> str:
+    """
+    Decrypt ciphertext using AES-256-CBC
+    Security: AES decryption with IV extraction
+    """
+    if not ciphertext:
+        return ""
+    
+    try:
+        # Security: Decode base64
+        encrypted_data = base64.b64decode(ciphertext.encode('utf-8'))
+        
+        # Security: Extract IV (first 16 bytes) and ciphertext
+        iv = encrypted_data[:16]
+        ciphertext_bytes = encrypted_data[16:]
+        
+        # Security: Create cipher with AES-256-CBC
+        cipher = Cipher(
+            algorithms.AES(key),
+            modes.CBC(iv),
+            backend=default_backend()
+        )
+        decryptor = cipher.decryptor()
+        
+        # Security: Decrypt
+        padded_plaintext = decryptor.update(ciphertext_bytes) + decryptor.finalize()
+        
+        # Security: Unpad
+        unpadder = padding.PKCS7(128).unpadder()
+        plaintext = unpadder.update(padded_plaintext)
+        plaintext += unpadder.finalize()
+        
+        return plaintext.decode('utf-8')
+    except Exception as e:
+        # Security: Log error but don't expose details
+        print(f"[SECURITY] Decryption error: {str(e)}")
+        raise ValueError("Decryption failed")
+
+
+def get_keys_directory() -> str:
+    """
+    Get the directory for storing AES keys locally
+    Security: Keys stored outside database in secure directory
+    """
+    # Security: Create keys directory in backend/app/keys
+    keys_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app", "keys")
+    os.makedirs(keys_dir, mode=0o700, exist_ok=True)  # Security: Restrictive permissions
+    return keys_dir
+
+
+def save_user_aes_key(user_id: int, key: bytes) -> bool:
+    """
+    Save user's AES key to local file (not in database)
+    Security: Keys stored locally with user_id as filename
+    """
+    try:
+        keys_dir = get_keys_directory()
+        key_file = os.path.join(keys_dir, f"user_{user_id}.key")
+        
+        # Security: Save key as base64 encoded
+        with open(key_file, 'wb') as f:
+            # Security: Write key with restricted permissions
+            os.chmod(key_file, 0o600)  # Read/write for owner only
+            f.write(base64.b64encode(key))
+        
+        return True
+    except Exception as e:
+        print(f"[SECURITY] Error saving AES key for user {user_id}: {str(e)}")
+        return False
+
+
+def load_user_aes_key(user_id: int) -> Optional[bytes]:
+    """
+    Load user's AES key from local file
+    Security: Keys loaded from local storage, not database
+    """
+    try:
+        keys_dir = get_keys_directory()
+        key_file = os.path.join(keys_dir, f"user_{user_id}.key")
+        
+        if not os.path.exists(key_file):
+            return None
+        
+        # Security: Read and decode key
+        with open(key_file, 'rb') as f:
+            encoded_key = f.read()
+            return base64.b64decode(encoded_key)
+    except Exception as e:
+        print(f"[SECURITY] Error loading AES key for user {user_id}: {str(e)}")
+        return None
+
+
+def delete_user_aes_key(user_id: int) -> bool:
+    """
+    Delete user's AES key from local storage
+    Security: Clean up keys when user is deleted
+    """
+    try:
+        keys_dir = get_keys_directory()
+        key_file = os.path.join(keys_dir, f"user_{user_id}.key")
+        
+        if os.path.exists(key_file):
+            os.remove(key_file)
+        
+        return True
+    except Exception as e:
+        print(f"[SECURITY] Error deleting AES key for user {user_id}: {str(e)}")
+        return False
 

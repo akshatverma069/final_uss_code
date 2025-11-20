@@ -12,7 +12,10 @@ from app.database import get_db
 from app.models import User, Password
 from app.schemas import PasswordAnalysisResponse
 from app.dependencies import get_current_user
-from app.security import calculate_password_strength
+from app.security import (
+    calculate_password_strength,
+    load_user_aes_key, aes_decrypt
+)
 from app.config import settings
 from fastapi import HTTPException, status
 
@@ -46,7 +49,15 @@ async def analyze_passwords(
     )
     passwords = result.scalars().all()
     
-    total_passwords = len(passwords)
+    # Security: Load user's AES key for decryption
+    aes_key = load_user_aes_key(current_user.user_id)
+    if not aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
+    total_passwords = 0
     compromised_count = 0
     weak_count = 0
     reused_count = 0
@@ -57,52 +68,63 @@ async def analyze_passwords(
     reused_passwords = []
     password_map = {}
     
-    # Security: Analyze each password
+    # Security: Analyze each password (decrypt first)
     for pwd in passwords:
-        # Security: Check if compromised
-        if pwd.application_password.lower().strip() in COMPROMISED_PASSWORDS:
-            compromised_count += 1
-            compromised_passwords.append({
-                "id": str(pwd.password_id),
-                "platform": pwd.application_name,
-                "username": pwd.account_user_name,
-                "password": pwd.application_password,
-                "breachCount": 1,
-                "lastBreachDate": "2024-01-15"
-            })
-        
-        # Security: Check strength
-        strength = calculate_password_strength(pwd.application_password)
-        if strength < 40:
-            weak_count += 1
-            weak_passwords.append({
-                "id": str(pwd.password_id),
-                "platform": pwd.application_name,
-                "username": pwd.account_user_name,
-                "password": pwd.application_password,
-                "score": strength,
-                "issues": get_password_issues(pwd.application_password)
-            })
-        elif strength >= 75:
-            strong_count += 1
-        
-        # Security: Check for reuse
-        pwd_lower = pwd.application_password.lower().strip()
-        if pwd_lower not in password_map:
-            password_map[pwd_lower] = []
-        password_map[pwd_lower].append(pwd)
+        try:
+            # Security: Decrypt password and username
+            decrypted_password = aes_decrypt(pwd.application_password, aes_key)
+            decrypted_username = aes_decrypt(pwd.account_user_name, aes_key)
+            
+            total_passwords += 1
+            
+            # Security: Check if compromised
+            if decrypted_password.lower().strip() in COMPROMISED_PASSWORDS:
+                compromised_count += 1
+                compromised_passwords.append({
+                    "id": str(pwd.password_id),
+                    "platform": pwd.application_name,
+                    "username": decrypted_username,
+                    "password": decrypted_password,
+                    "breachCount": 1,
+                    "lastBreachDate": "2024-01-15"
+                })
+            
+            # Security: Check strength
+            strength = calculate_password_strength(decrypted_password)
+            if strength < 40:
+                weak_count += 1
+                weak_passwords.append({
+                    "id": str(pwd.password_id),
+                    "platform": pwd.application_name,
+                    "username": decrypted_username,
+                    "password": decrypted_password,
+                    "score": strength,
+                    "issues": get_password_issues(decrypted_password)
+                })
+            elif strength >= 75:
+                strong_count += 1
+            
+            # Security: Check for reuse
+            pwd_lower = decrypted_password.lower().strip()
+            if pwd_lower not in password_map:
+                password_map[pwd_lower] = []
+            password_map[pwd_lower].append((pwd, decrypted_username))
+        except ValueError:
+            # Security: Skip passwords that can't be decrypted
+            continue
     
     # Security: Find reused passwords
     for pwd_value, pwd_list in password_map.items():
         if len(pwd_list) > 1:
             reused_count += 1
+            first_pwd, first_username = pwd_list[0]
             reused_passwords.append({
-                "id": str(pwd_list[0].password_id),
-                "platform": pwd_list[0].application_name,
-                "username": pwd_list[0].account_user_name,
-                "password": pwd_list[0].application_password,
+                "id": str(first_pwd.password_id),
+                "platform": first_pwd.application_name,
+                "username": first_username,
+                "password": pwd_value,  # Already decrypted
                 "reuseCount": len(pwd_list),
-                "usedIn": [f"{p.application_name} ({p.account_user_name})" for p in pwd_list]
+                "usedIn": [f"{pwd.application_name} ({username})" for pwd, username in pwd_list]
             })
     
     # Security: Calculate health score

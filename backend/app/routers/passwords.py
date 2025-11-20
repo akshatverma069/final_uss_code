@@ -16,7 +16,10 @@ from app.schemas import (
     PasswordCreate, PasswordUpdate, PasswordResponse, PasswordListResponse
 )
 from app.dependencies import get_current_user
-from app.security import calculate_password_strength, sanitize_input
+from app.security import (
+    calculate_password_strength, sanitize_input,
+    load_user_aes_key, aes_encrypt, aes_decrypt
+)
 from app.config import settings
 
 router = APIRouter(prefix="/api/passwords", tags=["Passwords"])
@@ -41,17 +44,29 @@ async def create_password(
     application_password = sanitize_input(password_data.application_password, 100)
     application_type = sanitize_input(password_data.application_type, 255) if password_data.application_type else None
     
-    # Security: Calculate password strength
+    # Security: Calculate password strength before encryption
     strength = calculate_password_strength(application_password)
     
+    # Security: Load user's AES key and encrypt application password
+    aes_key = load_user_aes_key(current_user.user_id)
+    if not aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
+    # Security: Encrypt application password and account username
+    encrypted_password = aes_encrypt(application_password, aes_key)
+    encrypted_username = aes_encrypt(account_user_name, aes_key)
+    
     try:
-        # Security: Create password entry
+        # Security: Create password entry with encrypted data
         new_password = Password(
             user_id=current_user.user_id,
             application_name=application_name,
             application_type=application_type,
-            account_user_name=account_user_name,
-            application_password=application_password,
+            account_user_name=encrypted_username,  # Store encrypted username
+            application_password=encrypted_password,  # Store encrypted password
             pswd_strength=strength,
             datetime_added=datetime.utcnow()
         )
@@ -105,6 +120,39 @@ async def get_passwords(
     result = await db.execute(query)
     passwords = result.scalars().all()
     
+    # Security: Load user's AES key for decryption
+    aes_key = load_user_aes_key(current_user.user_id)
+    if not aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
+    # Security: Decrypt passwords before returning
+    decrypted_passwords = []
+    for p in passwords:
+        try:
+            # Security: Decrypt application password and username
+            decrypted_password = aes_decrypt(p.application_password, aes_key)
+            decrypted_username = aes_decrypt(p.account_user_name, aes_key)
+            
+            # Security: Create temporary object with decrypted data
+            p_dict = {
+                "password_id": p.password_id,
+                "user_id": p.user_id,
+                "application_name": p.application_name,
+                "application_type": p.application_type,
+                "account_user_name": decrypted_username,
+                "application_password": decrypted_password,
+                "datetime_added": p.datetime_added,
+                "pswd_strength": p.pswd_strength
+            }
+            decrypted_passwords.append(PasswordResponse(**p_dict))
+        except ValueError as e:
+            # Security: Skip passwords that can't be decrypted (legacy or corrupted)
+            logging.warning(f"Failed to decrypt password {p.password_id}: {str(e)}")
+            continue
+    
     # Security: Get total count
     count_query = select(func.count(Password.password_id)).where(Password.user_id == current_user.user_id)
     if application_name:
@@ -116,7 +164,7 @@ async def get_passwords(
     total = count_result.scalar()
     
     return PasswordListResponse(
-        passwords=[PasswordResponse.model_validate(p) for p in passwords],
+        passwords=decrypted_passwords,
         total=total
     )
 
@@ -144,7 +192,36 @@ async def get_recent_passwords(
     )
     passwords = result.scalars().all()
     
-    return [PasswordResponse.model_validate(p) for p in passwords]
+    # Security: Load user's AES key for decryption
+    aes_key = load_user_aes_key(current_user.user_id)
+    if not aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
+    # Security: Decrypt passwords before returning
+    decrypted_passwords = []
+    for p in passwords:
+        try:
+            decrypted_password = aes_decrypt(p.application_password, aes_key)
+            decrypted_username = aes_decrypt(p.account_user_name, aes_key)
+            p_dict = {
+                "password_id": p.password_id,
+                "user_id": p.user_id,
+                "application_name": p.application_name,
+                "application_type": p.application_type,
+                "account_user_name": decrypted_username,
+                "application_password": decrypted_password,
+                "datetime_added": p.datetime_added,
+                "pswd_strength": p.pswd_strength
+            }
+            decrypted_passwords.append(PasswordResponse(**p_dict))
+        except ValueError as e:
+            logging.warning(f"Failed to decrypt password {p.password_id}: {str(e)}")
+            continue
+    
+    return decrypted_passwords
 
 
 @router.get("/{password_id}", response_model=PasswordResponse)
@@ -172,7 +249,33 @@ async def get_password(
             detail="Password not found"
         )
     
-    return PasswordResponse.model_validate(password)
+    # Security: Load user's AES key and decrypt
+    aes_key = load_user_aes_key(current_user.user_id)
+    if not aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
+    try:
+        decrypted_password = aes_decrypt(password.application_password, aes_key)
+        decrypted_username = aes_decrypt(password.account_user_name, aes_key)
+        p_dict = {
+            "password_id": password.password_id,
+            "user_id": password.user_id,
+            "application_name": password.application_name,
+            "application_type": password.application_type,
+            "account_user_name": decrypted_username,
+            "application_password": decrypted_password,
+            "datetime_added": password.datetime_added,
+            "pswd_strength": password.pswd_strength
+        }
+        return PasswordResponse(**p_dict)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to decrypt password data"
+        )
 
 
 @router.put("/{password_id}", response_model=PasswordResponse)
@@ -202,6 +305,14 @@ async def update_password(
             detail="Password not found"
         )
     
+    # Security: Load user's AES key
+    aes_key = load_user_aes_key(current_user.user_id)
+    if not aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
     # Security: Password rotation (year1 -> year2, year2 -> year3, etc.)
     password.year5 = password.year4
     password.year4 = password.year3
@@ -209,17 +320,20 @@ async def update_password(
     password.year2 = password.year1
     password.year1 = password.application_password
     
-    # Security: Update password
-    password.application_password = sanitize_input(password_data.application_password, 100)
+    # Security: Encrypt new password before storing
+    encrypted_password = aes_encrypt(sanitize_input(password_data.application_password, 100), aes_key)
+    password.application_password = encrypted_password
     
     # Security: Update other fields if provided
     if password_data.application_name:
         password.application_name = sanitize_input(password_data.application_name, 255)
     if password_data.account_user_name:
-        password.account_user_name = sanitize_input(password_data.account_user_name, 255)
+        # Security: Encrypt username if updated
+        encrypted_username = aes_encrypt(sanitize_input(password_data.account_user_name, 255), aes_key)
+        password.account_user_name = encrypted_username
     
-    # Security: Recalculate strength
-    password.pswd_strength = calculate_password_strength(password.application_password)
+    # Security: Recalculate strength (use plaintext for calculation)
+    password.pswd_strength = calculate_password_strength(password_data.application_password)
     password.datetime_added = datetime.utcnow()
     
     await db.commit()
@@ -349,5 +463,34 @@ async def get_passwords_by_application(
     )
     passwords = result.scalars().all()
     
-    return [PasswordResponse.model_validate(p) for p in passwords]
+    # Security: Load user's AES key and decrypt
+    aes_key = load_user_aes_key(current_user.user_id)
+    if not aes_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Encryption key not found. Please contact support."
+        )
+    
+    # Security: Decrypt passwords before returning
+    decrypted_passwords = []
+    for p in passwords:
+        try:
+            decrypted_password = aes_decrypt(p.application_password, aes_key)
+            decrypted_username = aes_decrypt(p.account_user_name, aes_key)
+            p_dict = {
+                "password_id": p.password_id,
+                "user_id": p.user_id,
+                "application_name": p.application_name,
+                "application_type": p.application_type,
+                "account_user_name": decrypted_username,
+                "application_password": decrypted_password,
+                "datetime_added": p.datetime_added,
+                "pswd_strength": p.pswd_strength
+            }
+            decrypted_passwords.append(PasswordResponse(**p_dict))
+        except ValueError as e:
+            logging.warning(f"Failed to decrypt password {p.password_id}: {str(e)}")
+            continue
+    
+    return decrypted_passwords
 

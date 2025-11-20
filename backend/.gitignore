@@ -53,6 +53,8 @@ logs/
 *.key
 *.pem
 secrets/
+app/keys/
+keys/
 
 # Testing
 .pytest_cache/
