@@ -230,9 +230,9 @@ async def share_password(
                     password_id=share_data.password_id
                 )
                 db.add(new_share)
-                print(f"[DEBUG] Added PasswordShare: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
+                print(f"[DEBUG] Added PasswordShare: group={share_data.group_name}, user_id={user_id} (RECEIVER), password_id={share_data.password_id}")
             except Exception as add_error:
-                print(f"[DEBUG] Error adding PasswordShare: {add_error}")
+                print(f"[DEBUG] Error adding PasswordShare for receiver user_id={user_id}: {add_error}")
                 # Try to create table again if it still doesn't exist
                 try:
                     await db.execute(text("""
@@ -257,7 +257,7 @@ async def share_password(
                         password_id=share_data.password_id
                     )
                     db.add(new_share)
-                    print(f"[DEBUG] Added PasswordShare after retry: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
+                    print(f"[DEBUG] Added PasswordShare after retry: group={share_data.group_name}, user_id={user_id} (RECEIVER), password_id={share_data.password_id}")
                 except Exception as retry_error:
                     print(f"[DEBUG] Failed to create PasswordShare after retry: {retry_error}")
                     raise HTTPException(
@@ -265,10 +265,24 @@ async def share_password(
                         detail=f"Failed to share password: {str(retry_error)}"
                     )
         else:
-            print(f"[DEBUG] PasswordShare already exists: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
+            print(f"[DEBUG] PasswordShare already exists: group={share_data.group_name}, user_id={user_id} (RECEIVER), password_id={share_data.password_id}")
     
     await db.commit()
-    print(f"[DEBUG] Committed share operation for password_id={share_data.password_id}, group={share_data.group_name}")
+    print(f"[DEBUG] Committed share operation for password_id={share_data.password_id}, group={share_data.group_name}, shared with {len(share_data.user_ids)} user(s)")
+    
+    # Verify shares were created by querying them back
+    verify_result = await db.execute(
+        select(PasswordShare).where(
+            and_(
+                PasswordShare.group_name == share_data.group_name,
+                PasswordShare.password_id == share_data.password_id
+            )
+        )
+    )
+    created_shares = verify_result.scalars().all()
+    print(f"[DEBUG] Verification: Found {len(created_shares)} PasswordShare records for password_id={share_data.password_id} in group={share_data.group_name}")
+    for share in created_shares:
+        print(f"[DEBUG] Verification: Share exists for user_id={share.user_id} (receiver can see this)")
     
     return {"success": True, "message": "Password shared successfully"}
 
@@ -332,8 +346,9 @@ async def get_shared_passwords(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Get passwords shared with current user by group admins
-    Security: Authentication required, non-admin check
+    Get passwords shared with current user (receiver view)
+    Security: Authentication required - returns passwords shared with current user
+    This endpoint is accessible to ALL users (both admins and non-admins)
     """
     # Security: Ensure password_shares table exists and migrate legacy data
     try:
@@ -572,6 +587,14 @@ async def get_shared_passwords(
                 continue
 
     print(f"[DEBUG] Returning {len(decrypted_shared)} decrypted shared passwords for user {current_user.user_id}")
+    
+    # Additional verification: Check if we found any shares but couldn't decrypt them
+    if len(all_shares) > 0 and len(decrypted_shared) == 0:
+        print(f"[WARNING] Found {len(all_shares)} PasswordShare records but 0 decrypted results for user {current_user.user_id}")
+        print(f"[WARNING] This might indicate a decryption or join issue")
+    
+    # Return the decrypted shared passwords
+    # This should work for ALL users (both admins and non-admins) who have passwords shared with them
     return decrypted_shared
 
 
