@@ -198,6 +198,9 @@ async def share_password(
                     password_id=share_data.password_id
                 )
                 db.add(new_share)
+                print(f"[DEBUG] Added PasswordShare: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
+            else:
+                print(f"[DEBUG] PasswordShare already exists: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
         except Exception as share_error:
             # If password_shares table doesn't exist, create it first
             error_str = str(share_error).lower()
@@ -226,17 +229,22 @@ async def share_password(
                         password_id=share_data.password_id
                     )
                     db.add(new_share)
+                    print(f"[DEBUG] Added PasswordShare after table creation: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
                 except Exception as create_error:
                     print(f"Error creating password_shares table during share: {create_error}")
                     # Fallback to old method only if table creation fails
                     if member:
                         member.password_id = share_data.password_id
+                        print(f"[DEBUG] Fallback: Set password_id on GroupMember: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
             else:
                 # For other errors, fall back to old method
+                print(f"[DEBUG] Share error (not table missing): {share_error}")
                 if member:
                     member.password_id = share_data.password_id
+                    print(f"[DEBUG] Fallback: Set password_id on GroupMember: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
     
     await db.commit()
+    print(f"[DEBUG] Committed share operation for password_id={share_data.password_id}, group={share_data.group_name}")
     
     return {"success": True, "message": "Password shared successfully"}
 
@@ -308,6 +316,19 @@ async def get_shared_passwords(
     try:
         # Try to query from password_shares table (supports multiple passwords)
         # This returns ALL passwords shared with the current user (receiver view)
+        
+        # First, let's check if there are any PasswordShare records for this user
+        check_result = await db.execute(
+            select(PasswordShare).where(
+                PasswordShare.user_id == current_user.user_id
+            )
+        )
+        all_shares = check_result.scalars().all()
+        print(f"[DEBUG] Total PasswordShare records for user {current_user.user_id}: {len(all_shares)}")
+        for share in all_shares:
+            print(f"[DEBUG] Share: group={share.group_name}, password_id={share.password_id}, user_id={share.user_id}")
+        
+        # Start query from PasswordShare to ensure we get all shares, then join to Password
         result = await db.execute(
             select(
                 Password.password_id,
@@ -317,14 +338,15 @@ async def get_shared_passwords(
                 Password.application_password,
                 PasswordShare.group_name,
             )
-            .join(PasswordShare, Password.password_id == PasswordShare.password_id)
+            .select_from(PasswordShare)
+            .join(Password, Password.password_id == PasswordShare.password_id)
             .where(
                 PasswordShare.user_id == current_user.user_id
             )
             .order_by(PasswordShare.share_id.desc())  # Order by share_id to get all results
         )
         shared = result.all()
-        print(f"[DEBUG] Found {len(shared)} shared passwords for user {current_user.user_id}")
+        print(f"[DEBUG] Found {len(shared)} shared passwords after join for user {current_user.user_id}")
     except Exception as e:
         # If password_shares table doesn't exist, try to create it and migrate data
         error_str = str(e).lower()
@@ -363,7 +385,8 @@ async def get_shared_passwords(
                         Password.application_password,
                         PasswordShare.group_name,
                     )
-                    .join(PasswordShare, Password.password_id == PasswordShare.password_id)
+                    .select_from(PasswordShare)
+                    .join(Password, Password.password_id == PasswordShare.password_id)
                     .where(
                         PasswordShare.user_id == current_user.user_id
                     )
@@ -377,6 +400,37 @@ async def get_shared_passwords(
         else:
             print(f"Error querying password_shares table: {e}")
             shared = []
+    
+    # Fallback: Also check group_members table for legacy shares (if password_shares table doesn't exist or is empty)
+    if len(shared) == 0:
+        try:
+            print(f"[DEBUG] Checking group_members table for legacy shares for user {current_user.user_id}")
+            # Query group_members where password_id is set (legacy method)
+            legacy_result = await db.execute(
+                select(
+                    Password.password_id,
+                    Password.user_id,
+                    Password.application_name,
+                    Password.account_user_name,
+                    Password.application_password,
+                    GroupMember.group_name,
+                )
+                .join(GroupMember, Password.password_id == GroupMember.password_id)
+                .where(
+                    and_(
+                        GroupMember.user_id == current_user.user_id,
+                        GroupMember.password_id.isnot(None)
+                    )
+                )
+            )
+            legacy_shared = legacy_result.all()
+            print(f"[DEBUG] Found {len(legacy_shared)} legacy shared passwords from group_members")
+            if len(legacy_shared) > 0:
+                # Merge legacy shares with new shares
+                shared = list(shared) + list(legacy_shared)
+                print(f"[DEBUG] Total shared passwords after merging: {len(shared)}")
+        except Exception as legacy_error:
+            print(f"[DEBUG] Error checking legacy shares: {legacy_error}")
     
     # Security: Decrypt with owner's key and return plaintext
     # If decryption fails or keys aren't available, return data as-is
