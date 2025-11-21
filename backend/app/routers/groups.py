@@ -156,6 +156,35 @@ async def share_password(
             detail="Only group admins can share passwords"
         )
     
+    # Security: Ensure password_shares table exists before sharing and migrate legacy data
+    try:
+        await db.execute(text("""
+            CREATE TABLE IF NOT EXISTS password_shares (
+                share_id INT AUTO_INCREMENT PRIMARY KEY,
+                group_name VARCHAR(500) NOT NULL,
+                user_id INT NOT NULL,
+                password_id INT NOT NULL,
+                INDEX idx_group_name (group_name),
+                INDEX idx_user_id (user_id),
+                INDEX idx_password_id (password_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (password_id) REFERENCES passwords(password_id) ON DELETE CASCADE,
+                UNIQUE KEY unique_share (group_name, user_id, password_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """))
+        # Migrate any existing shares from group_members to password_shares
+        await db.execute(text("""
+            INSERT IGNORE INTO password_shares (group_name, user_id, password_id)
+            SELECT group_name, user_id, password_id
+            FROM group_members
+            WHERE password_id IS NOT NULL
+        """))
+        await db.commit()
+        print(f"[DEBUG] Ensured password_shares table exists and migrated legacy data")
+    except Exception as table_error:
+        print(f"[DEBUG] Error ensuring password_shares table exists: {table_error}")
+        # Continue anyway - will try to create records
+    
     # Security: Share password with specified users using password_shares table
     for user_id in share_data.user_ids:
         # Security: Verify user is member of the group
@@ -180,18 +209,21 @@ async def share_password(
             db.add(new_member)
         
         # Security: Check if password is already shared with this user in this group
-        try:
-            existing_share = await db.execute(
-                select(PasswordShare).where(
-                    and_(
-                        PasswordShare.group_name == share_data.group_name,
-                        PasswordShare.user_id == user_id,
-                        PasswordShare.password_id == share_data.password_id
-                    )
+        # Always use password_shares table - no fallback to group_members
+        existing_share_result = await db.execute(
+            select(PasswordShare).where(
+                and_(
+                    PasswordShare.group_name == share_data.group_name,
+                    PasswordShare.user_id == user_id,
+                    PasswordShare.password_id == share_data.password_id
                 )
             )
-            if existing_share.scalar_one_or_none() is None:
-                # Security: Create new password share entry
+        )
+        existing_share = existing_share_result.scalar_one_or_none()
+        
+        if existing_share is None:
+            # Security: Create new password share entry in password_shares table
+            try:
                 new_share = PasswordShare(
                     group_name=share_data.group_name,
                     user_id=user_id,
@@ -199,14 +231,10 @@ async def share_password(
                 )
                 db.add(new_share)
                 print(f"[DEBUG] Added PasswordShare: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
-            else:
-                print(f"[DEBUG] PasswordShare already exists: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
-        except Exception as share_error:
-            # If password_shares table doesn't exist, create it first
-            error_str = str(share_error).lower()
-            if "doesn't exist" in error_str or "unknown table" in error_str or "1146" in error_str:
+            except Exception as add_error:
+                print(f"[DEBUG] Error adding PasswordShare: {add_error}")
+                # Try to create table again if it still doesn't exist
                 try:
-                    # Create the table
                     await db.execute(text("""
                         CREATE TABLE IF NOT EXISTS password_shares (
                             share_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -222,26 +250,22 @@ async def share_password(
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """))
                     await db.commit()
-                    # Now try to add the share again
+                    # Retry adding the share
                     new_share = PasswordShare(
                         group_name=share_data.group_name,
                         user_id=user_id,
                         password_id=share_data.password_id
                     )
                     db.add(new_share)
-                    print(f"[DEBUG] Added PasswordShare after table creation: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
-                except Exception as create_error:
-                    print(f"Error creating password_shares table during share: {create_error}")
-                    # Fallback to old method only if table creation fails
-                    if member:
-                        member.password_id = share_data.password_id
-                        print(f"[DEBUG] Fallback: Set password_id on GroupMember: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
-            else:
-                # For other errors, fall back to old method
-                print(f"[DEBUG] Share error (not table missing): {share_error}")
-                if member:
-                    member.password_id = share_data.password_id
-                    print(f"[DEBUG] Fallback: Set password_id on GroupMember: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
+                    print(f"[DEBUG] Added PasswordShare after retry: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
+                except Exception as retry_error:
+                    print(f"[DEBUG] Failed to create PasswordShare after retry: {retry_error}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to share password: {str(retry_error)}"
+                    )
+        else:
+            print(f"[DEBUG] PasswordShare already exists: group={share_data.group_name}, user_id={user_id}, password_id={share_data.password_id}")
     
     await db.commit()
     print(f"[DEBUG] Committed share operation for password_id={share_data.password_id}, group={share_data.group_name}")
@@ -311,6 +335,34 @@ async def get_shared_passwords(
     Get passwords shared with current user by group admins
     Security: Authentication required, non-admin check
     """
+    # Security: Ensure password_shares table exists and migrate legacy data
+    try:
+        await db.execute(text("""
+            CREATE TABLE IF NOT EXISTS password_shares (
+                share_id INT AUTO_INCREMENT PRIMARY KEY,
+                group_name VARCHAR(500) NOT NULL,
+                user_id INT NOT NULL,
+                password_id INT NOT NULL,
+                INDEX idx_group_name (group_name),
+                INDEX idx_user_id (user_id),
+                INDEX idx_password_id (password_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (password_id) REFERENCES passwords(password_id) ON DELETE CASCADE,
+                UNIQUE KEY unique_share (group_name, user_id, password_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """))
+        # Migrate any existing shares from group_members to password_shares
+        await db.execute(text("""
+            INSERT IGNORE INTO password_shares (group_name, user_id, password_id)
+            SELECT group_name, user_id, password_id
+            FROM group_members
+            WHERE password_id IS NOT NULL
+        """))
+        await db.commit()
+        print(f"[DEBUG] Ensured password_shares table exists and migrated legacy data")
+    except Exception as table_error:
+        print(f"[DEBUG] Error ensuring password_shares table exists: {table_error}")
+    
     # Security: Query shared passwords for non-admin users from password_shares table
     # This table supports multiple passwords per user per group
     try:
