@@ -324,6 +324,7 @@ async def get_shared_passwords(
             .order_by(PasswordShare.share_id.desc())  # Order by share_id to get all results
         )
         shared = result.all()
+        print(f"[DEBUG] Found {len(shared)} shared passwords for user {current_user.user_id}")
     except Exception as e:
         # If password_shares table doesn't exist, try to create it and migrate data
         error_str = str(e).lower()
@@ -369,6 +370,7 @@ async def get_shared_passwords(
                     .order_by(PasswordShare.share_id.desc())  # Order by share_id to get all results
                 )
                 shared = result.all()
+                print(f"[DEBUG] After table creation, found {len(shared)} shared passwords for user {current_user.user_id}")
             except Exception as create_error:
                 print(f"Error creating password_shares table: {create_error}")
                 shared = []
@@ -379,8 +381,25 @@ async def get_shared_passwords(
     # Security: Decrypt with owner's key and return plaintext
     # If decryption fails or keys aren't available, return data as-is
     decrypted_shared = []
-    for password_id, owner_user_id, application_name, account_user_name, application_password, group_name in shared:
+    for row in shared:
         try:
+            # Access Row object - try attribute access first, fallback to index
+            try:
+                password_id = row.password_id
+                owner_user_id = row.user_id
+                application_name = row.application_name
+                account_user_name = row.account_user_name
+                application_password = row.application_password
+                group_name = row.group_name
+            except (AttributeError, KeyError):
+                # Fallback to index access if attribute access fails
+                password_id = row[0]
+                owner_user_id = row[1]
+                application_name = row[2]
+                account_user_name = row[3]
+                application_password = row[4]
+                group_name = row[5]
+            
             # Security: Load password owner's AES key
             owner_aes_key = load_user_aes_key(owner_user_id)
             if owner_aes_key:
@@ -396,8 +415,9 @@ async def get_shared_passwords(
                         "application_password": decrypted_password,  # Return decrypted plaintext
                         "group_name": group_name,
                     })
-                except (ValueError, Exception):
+                except (ValueError, Exception) as decrypt_error:
                     # If decryption fails, return as-is (might already be plaintext)
+                    print(f"Decryption error for password {password_id}: {decrypt_error}")
                     decrypted_shared.append({
                         "password_id": password_id,
                         "application_name": application_name,
@@ -407,6 +427,7 @@ async def get_shared_passwords(
                     })
             else:
                 # Fallback: return as-is if key not found (might be plaintext)
+                print(f"AES key not found for user {owner_user_id}")
                 decrypted_shared.append({
                     "password_id": password_id,
                     "application_name": application_name,
@@ -416,14 +437,35 @@ async def get_shared_passwords(
                 })
         except Exception as e:
             # Fallback: return as-is if any error occurs
-            decrypted_shared.append({
-                "password_id": password_id,
-                "application_name": application_name,
-                "account_user_name": account_user_name,
-                "application_password": application_password,
-                "group_name": group_name,
-            })
+            print(f"Error processing shared password row: {e}")
+            try:
+                # Try to extract data using either attribute or index access
+                try:
+                    password_id = getattr(row, 'password_id', None) or (row[0] if len(row) > 0 else None)
+                    application_name = getattr(row, 'application_name', None) or (row[2] if len(row) > 2 else "")
+                    account_user_name = getattr(row, 'account_user_name', None) or (row[3] if len(row) > 3 else "")
+                    application_password = getattr(row, 'application_password', None) or (row[4] if len(row) > 4 else "")
+                    group_name = getattr(row, 'group_name', None) or (row[5] if len(row) > 5 else "")
+                except:
+                    password_id = row[0] if len(row) > 0 else None
+                    application_name = row[2] if len(row) > 2 else ""
+                    account_user_name = row[3] if len(row) > 3 else ""
+                    application_password = row[4] if len(row) > 4 else ""
+                    group_name = row[5] if len(row) > 5 else ""
+                
+                decrypted_shared.append({
+                    "password_id": password_id,
+                    "application_name": application_name,
+                    "account_user_name": account_user_name,
+                    "application_password": application_password,
+                    "group_name": group_name,
+                })
+            except Exception as inner_e:
+                # Skip this row if we can't process it
+                print(f"Could not process row, skipping: {inner_e}")
+                continue
 
+    print(f"[DEBUG] Returning {len(decrypted_shared)} decrypted shared passwords for user {current_user.user_id}")
     return decrypted_shared
 
 
